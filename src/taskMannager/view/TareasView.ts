@@ -134,7 +134,7 @@ export class TareasView extends obsidian.ItemView {
       this.renderGroup(board, team, groups[team.name] || [], tabTasks, taskPreviewMap)
 
     if (groups['Sin equipo']?.length)
-      this.renderGroup(board, { name: 'Sin equipo', color: '#555' }, groups['Sin equipo'], tabTasks, taskPreviewMap)
+      this.renderGroup(board, { name: 'Sin equipo', color: 'var(--text-faint)' }, groups['Sin equipo'], tabTasks, taskPreviewMap)
 
     if (this.activeTab === 'active') {
       const addGroup = root.createDiv({ cls: 'tareas-new-group' })
