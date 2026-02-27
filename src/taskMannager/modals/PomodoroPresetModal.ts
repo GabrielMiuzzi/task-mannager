@@ -24,6 +24,16 @@ export interface PomodoroPresetCardData {
 
 const POMODORO_PRESETS: PomodoroPreset[] = [
   {
+    id: 'debug-1-1',
+    title: '🛠 Debug - 1/1',
+    workLabel: 'Trabajo: 1 min',
+    shortBreakLabel: 'Descanso corto: 1 min',
+    cyclesLabel: 'Ciclos: 4',
+    longBreakLabel: 'Descanso largo: 1 min',
+    idealFor: 'Ideal para: probar rápido el flujo del temporizador y transiciones de fase.',
+    durations: { workMinutes: 1, shortBreakMinutes: 1, longBreakMinutes: 1 },
+  },
+  {
     id: 'standard-25-5',
     title: '⭐ Estándar - 25/5',
     workLabel: 'Trabajo: 25 min',
