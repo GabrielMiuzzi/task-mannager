@@ -1,0 +1,10 @@
+{
+  "id": "task-mannager",
+  "name": "task-mannager",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "Gestion de tareas estilo Notion con tabla interactiva, botones de accion y subtareas.",
+  "author": "Leandro",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}
