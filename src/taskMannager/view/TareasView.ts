@@ -399,7 +399,9 @@ export class TareasView extends obsidian.ItemView {
     const resetButton = iconControls.createEl('button', { text: '↺', cls: 'tareas-pomodoro-btn tareas-pomodoro-btn-icon' })
     resetButton.setAttr('aria-label', 'Reiniciar')
     resetButton.setAttr('title', 'Reiniciar')
-    resetButton.onclick = () => this.handlePomodoroReset()
+    resetButton.onclick = () => {
+      void this.handlePomodoroReset()
+    }
 
     const deviationButton = iconControls.createEl('button', {
       text: state.isDeviationActive ? '📵' : '📞',
@@ -444,9 +446,12 @@ export class TareasView extends obsidian.ItemView {
     this.render()
   }
 
-  private handlePomodoroReset() {
+  private async handlePomodoroReset() {
     this.unlockPomodoroAudio()
-    const next = resetPomodoro(this.getPomodoroRuntimeState(false))
+    const now = Date.now()
+    const current = this.getPomodoroRuntimeState(false)
+    await this.logPomodoroResetEntry(current, now)
+    const next = resetPomodoro(current)
     this.plugin.setPomodoroState(next)
     this.render()
   }
@@ -604,6 +609,7 @@ export class TareasView extends obsidian.ItemView {
       ? getTasks(this.app).find(item => item.file.path === state.selectedTaskPath)
       : null
     const taskName = selectedTask?.tarea || 'Sin tarea vinculada'
+    const durationChoice = this.resolvePomodoroDurationChoice(state.durations)
     const totalDeviationHours = this.roundToTwo(state.phaseDeviationSeconds / 3600)
 
     for (let index = 0; index < completedPhases.length; index++) {
@@ -611,11 +617,15 @@ export class TareasView extends obsidian.ItemView {
       const deviationHours = index === completedPhases.length - 1
         ? totalDeviationHours
         : 0
+      const durationMinutes = getPhaseDurationSeconds(state.durations, phase) / 60
       await appendPomodoroLogEntry(this.app, {
         timestampMs: nowMs,
         type: getPomodoroPhaseLabel(phase),
+        durationChoice,
         task: taskName,
+        durationMinutes,
         deviationHours,
+        finalized: true,
       })
     }
 
@@ -700,7 +710,7 @@ export class TareasView extends obsidian.ItemView {
     const table = wrap.createEl('table', { cls: 'tareas-pomodoro-log-table' })
     const head = table.createEl('thead')
     const headRow = head.createEl('tr')
-    for (const title of ['Horario', 'Tipo de pomodoro', 'Tarea', 'Desvio'])
+    for (const title of ['Horario', 'Tipo de pomodoro', 'Duración elegida', 'Tarea', 'Tiempo', 'Desvio', 'Finalización'])
       headRow.createEl('th', { text: title })
 
     const body = table.createEl('tbody')
@@ -708,8 +718,11 @@ export class TareasView extends obsidian.ItemView {
       const row = body.createEl('tr')
       row.createEl('td', { text: entry.time })
       row.createEl('td', { text: entry.type })
+      row.createEl('td', { text: entry.durationChoice })
       row.createEl('td', { text: entry.task })
+      row.createEl('td', { text: this.formatPomodoroDurationMinutes(entry.durationMinutes) })
       row.createEl('td', { text: `${this.formatDecimal(entry.deviationHours)} h` })
+      row.createEl('td', { text: entry.finalized ? 'true' : 'false' })
     }
 
     this.renderPomodoroHourlyHeatmap(section, todayEntries)
@@ -746,6 +759,84 @@ export class TareasView extends obsidian.ItemView {
       })
       cell.setAttr('title', `${String(hour).padStart(2, '0')}:00 - ${count} pomodoro(s) de trabajo`)
     }
+  }
+
+  private resolvePomodoroDurationChoice(durations: PomodoroDurations): string {
+    const cardData = getPomodoroPresetCardData(durations)
+    const normalizedTitle = cardData.title.replace(/^[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ]+/g, '').trim()
+    const baseLabel = normalizedTitle.split(' - ')[0]?.trim()
+    return baseLabel || 'Personalizado'
+  }
+
+  private formatPomodoroDurationMinutes(minutes: number): string {
+    if (!Number.isFinite(minutes) || minutes <= 0)
+      return '-'
+
+    const rounded = Math.round(minutes * 100) / 100
+    return `${this.formatDecimal(rounded)} min`
+  }
+
+  private async logPomodoroResetEntry(state: PomodoroState, nowMs: number) {
+    const elapsedSeconds = this.resolveElapsedSecondsForReset(state, nowMs)
+    if (elapsedSeconds <= 0 && state.phaseDeviationSeconds <= 0)
+      return
+
+    const durationChoice = this.resolvePomodoroDurationChoice(state.durations)
+    const selectedTask = state.selectedTaskPath
+      ? getTasks(this.app).find(item => item.file.path === state.selectedTaskPath)
+      : null
+    const taskName = selectedTask?.tarea || 'Sin tarea vinculada'
+    const durationMinutes = this.roundToTwo(elapsedSeconds / 60)
+    const deviationSeconds = state.phaseDeviationSeconds + (state.isDeviationActive ? elapsedSeconds : 0)
+    const deviationHours = this.roundToTwo(deviationSeconds / 3600)
+
+    await appendPomodoroLogEntry(this.app, {
+      timestampMs: nowMs,
+      type: getPomodoroPhaseLabel(state.phase),
+      durationChoice,
+      task: taskName,
+      durationMinutes,
+      deviationHours,
+      finalized: false,
+    })
+
+    if (state.isDeviationActive)
+      await this.addPomodoroDeviationTimeToSelectedTask(elapsedSeconds, state)
+    else if (state.phase === 'work')
+      await this.addPomodoroElapsedWorkTimeToSelectedTask(elapsedSeconds, state)
+  }
+
+  private resolveElapsedSecondsForReset(state: PomodoroState, nowMs: number): number {
+    if (state.isDeviationActive)
+      return getDeviationElapsedSeconds(state, nowMs)
+
+    const totalSeconds = Math.max(0, getPhaseDurationSeconds(state.durations, state.phase))
+    const remainingSeconds = Math.max(0, getPomodoroRemainingSeconds(state, nowMs))
+    return Math.max(0, totalSeconds - remainingSeconds)
+  }
+
+  private async addPomodoroElapsedWorkTimeToSelectedTask(elapsedSeconds: number, state: PomodoroState) {
+    if (elapsedSeconds <= 0)
+      return
+
+    const selectedTaskPath = state.selectedTaskPath
+    if (!selectedTaskPath)
+      return
+
+    const task = getTasks(this.app).find(item => item.file.path === selectedTaskPath)
+    if (!task) {
+      this.setPomodoroSelectedTaskPath(null)
+      new obsidian.Notice('La tarea seleccionada para Pomodoro ya no existe. Se quitó la selección.')
+      return
+    }
+
+    const workedHours = this.roundToTwo(elapsedSeconds / 3600)
+    if (workedHours <= 0)
+      return
+
+    const nextDedicated = this.roundToTwo(task.dedicado + workedHours)
+    await this.updateTask(task, { dedicado: nextDedicated })
+    new obsidian.Notice(`Se sumaron ${this.formatDecimal(workedHours)} h a "${task.tarea}".`, 5000)
   }
 
   private flashPomodoroPanel() {

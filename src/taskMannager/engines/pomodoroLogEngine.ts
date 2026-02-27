@@ -6,23 +6,29 @@ export interface PomodoroLogEntry {
   date: string
   time: string
   type: string
+  durationChoice: string
   task: string
+  durationMinutes: number
   deviationHours: number
+  finalized: boolean
 }
 
 interface AppendPomodoroLogEntryInput {
   timestampMs: number
   type: string
+  durationChoice: string
   task: string
+  durationMinutes: number
   deviationHours: number
+  finalized: boolean
 }
 
 const POMODORO_LOG_PATH = `${TAREAS_FOLDER}/${POMODORO_LOG_BASENAME}.md`
 const POMODORO_LOG_HEADER = [
   '# Registro Pomodoro',
   '',
-  '| fecha | horario | tipo de pomodoro | tarea | desvio |',
-  '| --- | --- | --- | --- | --- |',
+  '| fecha | horario | tipo de pomodoro | duracion elegida | tarea | tiempo | desvio | finalizacion |',
+  '| --- | --- | --- | --- | --- | --- | --- | --- |',
 ].join('\n')
 
 export async function appendPomodoroLogEntry(app: App, input: AppendPomodoroLogEntryInput) {
@@ -32,9 +38,12 @@ export async function appendPomodoroLogEntry(app: App, input: AppendPomodoroLogE
   const dateText = toLocalDateText(date)
   const timeText = toLocalTimeText(date)
   const typeText = sanitizePipeText(input.type)
+  const durationChoiceText = sanitizePipeText(input.durationChoice)
   const taskText = sanitizePipeText(input.task)
+  const durationMinutesText = formatMinutes(input.durationMinutes)
   const deviationText = formatHours(input.deviationHours)
-  const row = `| ${dateText} | ${timeText} | ${typeText} | ${taskText} | ${deviationText} |`
+  const finalizedText = input.finalized ? 'true' : 'false'
+  const row = `| ${dateText} | ${timeText} | ${typeText} | ${durationChoiceText} | ${taskText} | ${durationMinutesText} | ${deviationText} | ${finalizedText} |`
 
   const file = app.vault.getAbstractFileByPath(POMODORO_LOG_PATH)
   if (!(file instanceof TFile))
@@ -62,7 +71,7 @@ export async function readPomodoroLogEntries(app: App): Promise<PomodoroLogEntry
     if (!line.trim().startsWith('|'))
       continue
 
-    if (line.includes('fecha | horario | tipo de pomodoro | tarea | desvio'))
+    if (line.includes('fecha | horario | tipo de pomodoro'))
       continue
 
     if (line.includes('| --- |'))
@@ -72,13 +81,23 @@ export async function readPomodoroLogEntries(app: App): Promise<PomodoroLogEntry
     if (columns.length < 5)
       continue
 
-    const deviationHours = Number.parseFloat(columns[4])
+    const hasDurationColumns = columns.length >= 7
+    const hasFinalizedColumn = columns.length >= 8
+    const durationChoice = hasDurationColumns ? columns[3] : '-'
+    const task = hasDurationColumns ? columns[4] : columns[3]
+    const durationMinutes = hasDurationColumns ? Number.parseFloat(columns[5]) : 0
+    const deviationHours = Number.parseFloat(hasDurationColumns ? columns[6] : columns[4])
+    const finalizedValue = hasFinalizedColumn ? columns[7] : 'true'
+
     entries.push({
       date: columns[0],
       time: columns[1],
       type: columns[2],
-      task: columns[3],
+      durationChoice,
+      task,
+      durationMinutes: Number.isNaN(durationMinutes) ? 0 : durationMinutes,
       deviationHours: Number.isNaN(deviationHours) ? 0 : deviationHours,
+      finalized: finalizedValue.toLowerCase() !== 'false',
     })
   }
 
@@ -128,4 +147,8 @@ function sanitizePipeText(value: string): string {
 
 function formatHours(hours: number): string {
   return (Math.round(hours * 100) / 100).toFixed(2)
+}
+
+function formatMinutes(minutes: number): string {
+  return (Math.round(minutes * 100) / 100).toFixed(2)
 }

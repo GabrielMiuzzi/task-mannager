@@ -63,7 +63,6 @@ export class TareasPlugin extends obsidian.Plugin {
     })
 
     await this.ensureTasksFolder()
-    await this.ensureBoardWorkspace(DEFAULT_BOARD_NAME)
     await syncAllTaskIndexes(this.app)
     await rebuildTaskChildLinks(this.app)
     await syncTaskTypeTags(this.app)
@@ -278,6 +277,7 @@ export class TareasPlugin extends obsidian.Plugin {
   }
 
   private async ensureFolderPath(path: string) {
+    const adapter = this.app.vault.adapter
     const segments = path.split('/').filter(Boolean)
     let currentPath = ''
 
@@ -297,6 +297,9 @@ export class TareasPlugin extends obsidian.Plugin {
       catch {
         const retry = this.app.vault.getAbstractFileByPath(currentPath)
         if (retry instanceof obsidian.TFolder)
+          continue
+
+        if (await adapter.exists(currentPath))
           continue
 
         throw new Error(`No se pudo crear la carpeta "${currentPath}".`)
