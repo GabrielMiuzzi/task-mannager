@@ -42,7 +42,7 @@ export class SelectPomodoroTaskModal extends obsidian.Modal {
 
         item.createEl('p', { cls: 'tareas-pomodoro-task-name', text: task.tarea })
         const details = [
-          task.equipo ? `Equipo: ${task.equipo}` : null,
+          task.tablero ? `Tablero: ${task.tablero}` : null,
           `Estado: ${task.estado}`,
         ].filter(Boolean).join(' · ')
         item.createEl('p', { cls: 'tareas-pomodoro-task-meta', text: details })

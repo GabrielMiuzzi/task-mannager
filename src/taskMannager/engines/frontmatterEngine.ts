@@ -1,14 +1,15 @@
 import type { App, TFile } from 'obsidian'
 
 import {
+  CANCELLED_TASK_INDEX_BASENAME,
   FINISHED_TASK_INDEX_BASENAME,
   INDEX_TAG,
   SUBTASK_TAG,
-  SUBTASKS_FOLDER,
   TAREAS_FOLDER,
   TASK_INDEX_BASENAME,
   TASK_TAG,
 } from '../constants'
+import { isBoardTaskIndexPath } from './taskIndexEngine'
 import type { TaskFrontmatter } from '../types'
 import { toTaskFrontmatter } from '../utils/guards'
 
@@ -19,14 +20,14 @@ export async function updateFrontmatter(app: App, file: TFile, updates: Partial<
   })
 }
 
-export async function renameTeamInTasks(app: App, oldName: string, newName: string) {
+export async function renameTeamInTasks(app: App, oldName: string, newName: string, boardName: string) {
   const files = app.vault
     .getMarkdownFiles()
     .filter(file => file.path.startsWith(`${TAREAS_FOLDER}/`))
 
   for (const file of files) {
     const fm = toTaskFrontmatter(app.metadataCache.getFileCache(file)?.frontmatter)
-    if (fm?.equipo !== oldName)
+    if (fm?.equipo !== oldName || (fm?.tablero || '').trim().toLowerCase() !== boardName.trim().toLowerCase())
       continue
 
     await app.fileManager.processFrontMatter(file, (frontmatter) => {
@@ -35,7 +36,7 @@ export async function renameTeamInTasks(app: App, oldName: string, newName: stri
   }
 }
 
-export function countTopLevelTeamTasks(app: App, teamName: string): number {
+export function countTopLevelTeamTasks(app: App, teamName: string, boardName: string): number {
   const files = app.vault
     .getMarkdownFiles()
     .filter(file => file.path.startsWith(`${TAREAS_FOLDER}/`))
@@ -43,7 +44,9 @@ export function countTopLevelTeamTasks(app: App, teamName: string): number {
   let count = 0
   for (const file of files) {
     const fm = toTaskFrontmatter(app.metadataCache.getFileCache(file)?.frontmatter)
-    if (fm?.equipo === teamName && !fm?.parent)
+    if (fm?.equipo === teamName
+      && (fm?.tablero || '').trim().toLowerCase() === boardName.trim().toLowerCase()
+      && !fm?.parent)
       count++
   }
 
@@ -54,7 +57,9 @@ export async function rebuildTaskChildLinks(app: App) {
   const files = app.vault
     .getMarkdownFiles()
     .filter(file => file.path.startsWith(`${TAREAS_FOLDER}/`))
-    .filter(file => file.basename !== TASK_INDEX_BASENAME && file.basename !== FINISHED_TASK_INDEX_BASENAME)
+    .filter(file => file.basename !== TASK_INDEX_BASENAME
+      && file.basename !== FINISHED_TASK_INDEX_BASENAME
+      && file.basename !== CANCELLED_TASK_INDEX_BASENAME)
 
   const childMap = new Map<string, Set<string>>()
   const taskEntries: Array<{ file: TFile, taskName: string }> = []
@@ -210,10 +215,13 @@ function normalizeParentReference(parentValue: string | undefined): string {
 }
 
 function resolveClassificationTag(file: TFile): string {
-  if (file.basename === TASK_INDEX_BASENAME || file.basename === FINISHED_TASK_INDEX_BASENAME)
+  if (file.basename === TASK_INDEX_BASENAME
+    || file.basename === FINISHED_TASK_INDEX_BASENAME
+    || file.basename === CANCELLED_TASK_INDEX_BASENAME
+    || isBoardTaskIndexPath(file.path))
     return INDEX_TAG
 
-  if (file.path.startsWith(`${SUBTASKS_FOLDER}/`) || file.path.includes('/subTasks/'))
+  if (file.path.includes('/subTasks/'))
     return SUBTASK_TAG
 
   return TASK_TAG

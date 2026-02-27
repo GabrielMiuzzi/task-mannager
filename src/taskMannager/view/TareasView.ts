@@ -1,7 +1,7 @@
 import * as obsidian from 'obsidian'
 
-import { ESTADOS, PRIORIDADES, VIEW_TYPE } from '../constants'
-import { moveTaskToActiveFolder, moveTaskToCompletedFolder } from '../engines/completionEngine'
+import { DEFAULT_BOARD_NAME, ESTADOS, ORDER_STEP, POMODORO_LOG_BASENAME, PRIORIDADES, VIEW_TYPE } from '../constants'
+import { moveTaskToActiveFolder, moveTaskToCancelledFolder, moveTaskToCompletedFolder } from '../engines/completionEngine'
 import { updateFrontmatter } from '../engines/frontmatterEngine'
 import { persistTaskOrder, reorderList } from '../engines/orderEngine'
 import {
@@ -22,12 +22,22 @@ import {
 } from '../engines/pomodoroEngine'
 import { appendPomodoroLogEntry, getEntriesByDate, readPomodoroLogEntries, toLocalDateText } from '../engines/pomodoroLogEngine'
 import { rebalanceGroupEndDates } from '../engines/scheduleEngine'
-import { extractTaskBodyPreview, getTasks, groupTopLevelTasks, isTaskInCompletedFolder, parseTaskDate } from '../engines/taskEngine'
+import {
+  extractTaskBodyPreview,
+  getTasks,
+  groupTopLevelTasks,
+  isTaskInCancelledFolder,
+  isTaskInCompletedFolder,
+  isTaskInFinishedFolder,
+  parseTaskDate,
+} from '../engines/taskEngine'
+import { EditSectionModal } from '../modals/EditSectionModal'
+import { NewBoardModal } from '../modals/NewBoardModal'
 import { NewGroupModal } from '../modals/NewGroupModal'
 import { NewTaskModal } from '../modals/NewTaskModal'
-import { EditSectionModal } from '../modals/EditSectionModal'
 import { EditTaskFileModal } from '../modals/EditTaskFileModal'
 import { AddTaskCommentModal } from '../modals/AddTaskCommentModal'
+import { ConfirmDeleteTaskModal } from '../modals/ConfirmDeleteTaskModal'
 import { getPomodoroPresetCardData, PomodoroPresetModal } from '../modals/PomodoroPresetModal'
 import { SelectPomodoroTaskModal } from '../modals/SelectPomodoroTaskModal'
 import type { TareasPlugin } from '../plugin/TareasPlugin'
@@ -36,17 +46,23 @@ import { showDropdown } from '../ui/dropdown'
 import { debounce } from '../utils/debounce'
 
 export class TareasView extends obsidian.ItemView {
+  private static readonly COMPLETED_TAB_ID = '__completed__'
+  private static readonly CANCELLED_TAB_ID = '__cancelled__'
+  private static readonly POMODORO_TAB_ID = '__pomodoro__'
+
   private plugin: TareasPlugin
   expandedGroups: Set<string>
   expandedTasks: Set<string>
   expandedCardSubtasks: Set<string>
 
   private debouncedRender: () => void
-  private dragGroup: string | null = null
   private dragPath: string | null = null
   private dragDepth: number | null = null
   private dragParent: string | null = null
-  private activeTab: 'active' | 'completed' | 'pomodoro' = 'active'
+  private dragInsertPosition: 'before' | 'after' | null = null
+  private droppedTaskAnimationPath: string | null = null
+  private lastRenderedTab: string | null = null
+  private activeTab: string
   private pomodoroPanelEl: HTMLElement | null = null
   private pomodoroTimeEl: HTMLElement | null = null
   private pomodoroProgressEl: HTMLElement | null = null
@@ -58,9 +74,10 @@ export class TareasView extends obsidian.ItemView {
   constructor(leaf: obsidian.WorkspaceLeaf, plugin: TareasPlugin) {
     super(leaf)
     this.plugin = plugin
-    this.expandedGroups = new Set(plugin.equipos.map(equipo => equipo.name))
+    this.expandedGroups = new Set(plugin.equipos.map(equipo => `${equipo.tablero || 'default'}::${equipo.name}`))
     this.expandedTasks = new Set()
     this.expandedCardSubtasks = new Set()
+    this.activeTab = plugin.tableros[0]?.name || 'default'
     this.debouncedRender = debounce(() => this.render(), 250)
   }
 
@@ -104,49 +121,59 @@ export class TareasView extends obsidian.ItemView {
   }
 
   async render() {
+    this.ensureValidActiveTab()
+    const shouldAnimateTabTransition = this.lastRenderedTab !== null && this.lastRenderedTab !== this.activeTab
+    this.lastRenderedTab = this.activeTab
+
     const root = this.getRootEl()
     root.empty()
     this.resetPomodoroDomRefs()
 
     this.renderHeader(root)
     this.renderTabs(root)
+    const content = root.createDiv({ cls: 'tareas-tab-content' })
+    if (shouldAnimateTabTransition)
+      content.addClass('tareas-tab-content-animate')
 
-    if (this.activeTab === 'pomodoro') {
-      await this.renderPomodoroPanel(root)
+    if (this.activeTab === TareasView.POMODORO_TAB_ID) {
+      await this.renderPomodoroPanel(content)
       return
     }
 
     const allTasks = getTasks(this.app)
-    const tabTasks = this.activeTab === 'completed'
-      ? allTasks.filter(task => isTaskInCompletedFolder(task.file.path))
-      : allTasks.filter(task => !isTaskInCompletedFolder(task.file.path))
-    const groups = groupTopLevelTasks(tabTasks, this.plugin.equipos)
+    const tabTasks = this.activeTab === TareasView.COMPLETED_TAB_ID
+      ? allTasks.filter(task => isTaskInFinishedFolder(task.file.path))
+      : this.activeTab === TareasView.CANCELLED_TAB_ID
+        ? allTasks.filter(task => isTaskInCancelledFolder(task.file.path))
+        : allTasks
+            .filter(task => !isTaskInCompletedFolder(task.file.path))
+            .filter(task => task.file.basename.toLowerCase() !== POMODORO_LOG_BASENAME.toLowerCase())
+            .filter(task => task.tablero === this.activeTab)
 
-    if (this.activeTab === 'completed') {
-      this.renderCompletedTable(root, tabTasks)
+    if (this.activeTab === TareasView.COMPLETED_TAB_ID || this.activeTab === TareasView.CANCELLED_TAB_ID) {
+      this.renderCompletedTable(content, tabTasks)
       return
     }
 
     const taskPreviewMap = await this.buildTaskPreviewMap(tabTasks)
-    const board = root.createDiv({ cls: 'tareas-board' })
+    const board = content.createDiv({ cls: 'tareas-board' })
+    const boardGroups = this.plugin.getEquiposForTablero(this.activeTab)
+    const groups = groupTopLevelTasks(tabTasks, boardGroups)
+    for (const group of boardGroups)
+      this.renderGroup(board, group, groups[group.name] || [], tabTasks, taskPreviewMap)
 
-    for (const team of this.plugin.equipos)
-      this.renderGroup(board, team, groups[team.name] || [], tabTasks, taskPreviewMap)
+    if (groups['Sin grupo']?.length)
+      this.renderGroup(board, { name: 'Sin grupo', color: 'var(--text-faint)' }, groups['Sin grupo'], tabTasks, taskPreviewMap)
 
-    if (groups['Sin equipo']?.length)
-      this.renderGroup(board, { name: 'Sin equipo', color: 'var(--text-faint)' }, groups['Sin equipo'], tabTasks, taskPreviewMap)
-
-    if (this.activeTab === 'active') {
-      const addGroup = root.createDiv({ cls: 'tareas-new-group' })
-      const addGroupLink = addGroup.createEl('span', { text: '+ Nuevo grupo', cls: 'tareas-add-link' })
-      addGroupLink.onclick = () => new NewGroupModal(this.app, this.plugin, this).open()
-    }
+    const addGroup = content.createDiv({ cls: 'tareas-new-group' })
+    const addGroupLink = addGroup.createEl('span', { text: '+ Nuevo grupo', cls: 'tareas-add-link' })
+    addGroupLink.onclick = () => new NewGroupModal(this.app, this.plugin, this, this.activeTab).open()
   }
 
   private renderCompletedTable(root: HTMLElement, tasks: TaskItem[]) {
     const wrap = root.createDiv({ cls: 'tareas-table-wrap' })
     const table = wrap.createEl('table', { cls: 'tareas-table' })
-    const columns = ['', '', 'Tarea', 'Estado', 'Equipo', 'Prioridad', 'Dedicado', 'Estimación', 'Inicio', 'Fin', '%', 'Acciones']
+    const columns = ['', '', 'Tarea', 'Estado', 'Grupo', 'Prioridad', 'Dedicado', 'Estimación', 'Inicio', 'Fin', '%', 'Acciones']
 
     const tableHead = table.createEl('thead')
     const headRow = tableHead.createEl('tr')
@@ -168,30 +195,41 @@ export class TareasView extends obsidian.ItemView {
   private renderTabs(root: HTMLElement) {
     const tabs = root.createDiv({ cls: 'tareas-tabs' })
 
-    const activeBtn = tabs.createEl('button', {
-      text: 'Activas',
-      cls: `tareas-tab-btn${this.activeTab === 'active' ? ' is-active' : ''}`,
-    })
-    activeBtn.onclick = () => {
-      this.activeTab = 'active'
-      this.render()
+    for (const board of this.plugin.tableros) {
+      const boardBtn = tabs.createEl('button', {
+        text: board.name,
+        cls: `tareas-tab-btn${this.activeTab === board.name ? ' is-active' : ''}`,
+      })
+      boardBtn.onclick = () => {
+        this.activeTab = board.name
+        this.render()
+      }
     }
 
     const completedBtn = tabs.createEl('button', {
       text: 'Completadas',
-      cls: `tareas-tab-btn${this.activeTab === 'completed' ? ' is-active' : ''}`,
+      cls: `tareas-tab-btn${this.activeTab === TareasView.COMPLETED_TAB_ID ? ' is-active' : ''}`,
     })
     completedBtn.onclick = () => {
-      this.activeTab = 'completed'
+      this.activeTab = TareasView.COMPLETED_TAB_ID
+      this.render()
+    }
+
+    const cancelledBtn = tabs.createEl('button', {
+      text: 'Canceladas',
+      cls: `tareas-tab-btn${this.activeTab === TareasView.CANCELLED_TAB_ID ? ' is-active' : ''}`,
+    })
+    cancelledBtn.onclick = () => {
+      this.activeTab = TareasView.CANCELLED_TAB_ID
       this.render()
     }
 
     const pomodoroBtn = tabs.createEl('button', {
       text: 'Pomodoro',
-      cls: `tareas-tab-btn${this.activeTab === 'pomodoro' ? ' is-active' : ''}`,
+      cls: `tareas-tab-btn${this.activeTab === TareasView.POMODORO_TAB_ID ? ' is-active' : ''}`,
     })
     pomodoroBtn.onclick = () => {
-      this.activeTab = 'pomodoro'
+      this.activeTab = TareasView.POMODORO_TAB_ID
       this.render()
     }
   }
@@ -473,7 +511,7 @@ export class TareasView extends obsidian.ItemView {
 
   private async handlePomodoroTick() {
     const runtimeState = this.getPomodoroRuntimeState(true)
-    if (this.activeTab === 'pomodoro')
+    if (this.activeTab === TareasView.POMODORO_TAB_ID)
       this.updatePomodoroDom(runtimeState, Date.now())
   }
 
@@ -487,7 +525,7 @@ export class TareasView extends obsidian.ItemView {
       if (notifyCompletion)
         this.notifyPomodoroTransitions(advanced.completedPhases, advanced.state)
 
-      if (this.activeTab === 'pomodoro')
+      if (this.activeTab === TareasView.POMODORO_TAB_ID)
         void this.render()
 
       return advanced.state
@@ -589,7 +627,7 @@ export class TareasView extends obsidian.ItemView {
       })
     }
 
-    if (this.activeTab === 'pomodoro')
+    if (this.activeTab === TareasView.POMODORO_TAB_ID)
       await this.render()
   }
 
@@ -807,6 +845,35 @@ export class TareasView extends obsidian.ItemView {
     this.pomodoroStateEl = null
   }
 
+  private ensureValidActiveTab() {
+    const boardNames = this.plugin.tableros.map(board => board.name)
+    const fixedTabs = new Set([
+      TareasView.COMPLETED_TAB_ID,
+      TareasView.CANCELLED_TAB_ID,
+      TareasView.POMODORO_TAB_ID,
+    ])
+
+    if (fixedTabs.has(this.activeTab))
+      return
+
+    if (boardNames.includes(this.activeTab))
+      return
+
+    this.activeTab = boardNames[0] || 'default'
+  }
+
+  private getGroupExpansionKey(groupName: string): string {
+    return `${this.activeTab}::${groupName}`
+  }
+
+  private isArchivedTab(): boolean {
+    return this.activeTab === TareasView.COMPLETED_TAB_ID || this.activeTab === TareasView.CANCELLED_TAB_ID
+  }
+
+  private isPomodoroTab(): boolean {
+    return this.activeTab === TareasView.POMODORO_TAB_ID
+  }
+
   private renderHeader(root: HTMLElement) {
     const header = root.createDiv({ cls: 'tareas-header' })
 
@@ -818,49 +885,80 @@ export class TareasView extends obsidian.ItemView {
     actions.createEl('span', { text: '▦ Tablero', cls: 'tareas-view-toggle' })
 
     const newButton = actions.createEl('button', { cls: 'tareas-btn-new' })
-    newButton.createEl('span', { text: 'Nuevo ▾' })
-    newButton.onclick = () => new NewTaskModal(this.app, this.plugin).open()
+    newButton.createEl('span', { text: 'Nuevo tablero' })
+    newButton.onclick = () => new NewBoardModal(this.app, this.plugin, this).open()
+
+    const deleteButton = actions.createEl('button', { cls: 'tareas-btn-delete-board' })
+    deleteButton.createEl('span', { text: 'Eliminar tablero' })
+    deleteButton.disabled = !this.plugin.canRemoveTablero(this.activeTab)
+    deleteButton.onclick = () => this.openDeleteBoardConfirm()
+  }
+
+  private openDeleteBoardConfirm() {
+    if (!this.plugin.canRemoveTablero(this.activeTab)) {
+      new obsidian.Notice(`El tablero "${this.activeTab}" no se puede eliminar.`)
+      return
+    }
+
+    const boardName = this.activeTab
+    const boardTasks = getTasks(this.app).filter(task => task.tablero === boardName)
+    const topLevelCount = boardTasks.filter(task => !task.parent).length
+    const subtaskCount = boardTasks.length - topLevelCount
+    const taskSummary = subtaskCount > 0
+      ? `${topLevelCount} tarea(s) y ${subtaskCount} subtarea(s)`
+      : `${topLevelCount} tarea(s)`
+
+    new ConfirmDeleteTaskModal(this.app, {
+      title: 'Eliminar tablero',
+      message: `¿Seguro que querés eliminar el tablero "${boardName}"? Se borrarán ${taskSummary}, sus archivos .md, grupos y carpetas asociadas.`,
+      confirmText: 'Aceptar',
+      onConfirm: async () => {
+        const removed = await this.plugin.removeTablero(boardName)
+        if (!removed) {
+          new obsidian.Notice(`No se pudo eliminar el tablero "${boardName}".`)
+          return
+        }
+
+        this.activeTab = this.plugin.tableros[0]?.name || DEFAULT_BOARD_NAME
+        await this.render()
+        new obsidian.Notice(`Tablero "${boardName}" eliminado.`)
+      },
+    }).open()
   }
 
   private renderGroup(
     root: HTMLElement,
-    team: Equipo,
+    group: Equipo,
     tasks: TaskItem[],
     allTasks: TaskItem[],
     taskPreviewMap: Map<string, string>,
   ) {
-    const teamName = team.name
-    const isManaged = this.plugin.equipos.some(item => item.name === teamName)
-    const expanded = this.expandedGroups.has(teamName)
+    const groupName = group.name
+    const expansionKey = this.getGroupExpansionKey(groupName)
+    const isManaged = this.plugin.getEquiposForTablero(this.activeTab).some(item => item.name === groupName)
+    const expanded = this.expandedGroups.has(expansionKey)
 
-    const group = root.createDiv({ cls: 'tareas-group' })
-    group.dataset.equipo = teamName
-
-    const header = group.createDiv({ cls: 'tareas-group-header' })
-
-    if (isManaged)
-      this.attachGroupDragHandlers(root, group, header, teamName)
+    const column = root.createDiv({ cls: 'tareas-group' })
+    const header = column.createDiv({ cls: 'tareas-group-header' })
 
     header.createEl('span', { text: expanded ? '▼ ' : '▶ ', cls: 'tareas-toggle' })
-
-    const badge = header.createEl('span', { text: teamName, cls: 'tareas-badge' })
-    badge.style.background = team.color
-
+    const badge = header.createEl('span', { text: groupName, cls: 'tareas-badge' })
+    badge.style.background = group.color
     header.createEl('span', { text: `  ${tasks.length}`, cls: 'tareas-count' })
 
     if (isManaged) {
       const editButton = header.createEl('button', { text: '✎', cls: 'tareas-group-edit-btn' })
       editButton.onclick = (event) => {
         event.stopPropagation()
-        new EditSectionModal(this.app, this.plugin, team, this).open()
+        new EditSectionModal(this.app, this.plugin, group, this, this.activeTab).open()
       }
     }
 
     header.onclick = () => {
       if (expanded)
-        this.expandedGroups.delete(teamName)
+        this.expandedGroups.delete(expansionKey)
       else
-        this.expandedGroups.add(teamName)
+        this.expandedGroups.add(expansionKey)
 
       this.render()
     }
@@ -869,16 +967,17 @@ export class TareasView extends obsidian.ItemView {
       return
 
     tasks.sort((a, b) => a.order - b.order)
-
-    const cards = group.createDiv({ cls: 'tareas-card-list' })
+    const cards = column.createDiv({ cls: 'tareas-card-list' })
+    cards.dataset.group = groupName
+    cards.dataset.board = this.activeTab
+    cards.dataset.hasTasks = tasks.length > 0 ? 'true' : 'false'
+    this.attachGroupCardListDropHandlers(cards, groupName, allTasks)
     for (const task of tasks)
       this.renderTaskCard(cards, task, allTasks, taskPreviewMap.get(task.file.path) || '')
 
-    if (this.activeTab === 'active') {
-      const addCard = cards.createDiv({ cls: 'tareas-task-card tareas-task-card-add' })
-      const link = addCard.createEl('span', { text: '+ Nueva tarea', cls: 'tareas-add-link' })
-      link.onclick = () => new NewTaskModal(this.app, this.plugin, teamName).open()
-    }
+    const addCard = cards.createDiv({ cls: 'tareas-task-card tareas-task-card-add' })
+    const link = addCard.createEl('span', { text: '+ Nueva tarea', cls: 'tareas-add-link' })
+    link.onclick = () => new NewTaskModal(this.app, this.plugin, this.activeTab, '', groupName).open()
   }
 
   private renderTaskCard(container: HTMLElement, task: TaskItem, allTasks: TaskItem[], taskPreview: string) {
@@ -889,6 +988,12 @@ export class TareasView extends obsidian.ItemView {
     const subtasksExpanded = this.expandedCardSubtasks.has(task.file.path)
 
     const card = container.createDiv({ cls: 'tareas-task-card' })
+    card.dataset.path = task.file.path
+    if (this.droppedTaskAnimationPath === task.file.path) {
+      card.addClass('tareas-task-card-drop-animate')
+      this.droppedTaskAnimationPath = null
+    }
+
     this.attachCardDragHandlers(container, card, task, allTasks)
     this.attachCardEditHandlers(card, task)
 
@@ -942,7 +1047,7 @@ export class TareasView extends obsidian.ItemView {
     const addSubtask = footer.createEl('span', { text: '+ Subtarea', cls: 'tareas-add-link' })
     addSubtask.onclick = (event) => {
       event.stopPropagation()
-      new NewTaskModal(this.app, this.plugin, task.equipo, task.file.basename).open()
+      new NewTaskModal(this.app, this.plugin, task.tablero, task.file.basename, task.equipo).open()
     }
 
     if (hasSubtasks && subtasksExpanded)
@@ -1021,7 +1126,7 @@ export class TareasView extends obsidian.ItemView {
     for (const subtask of subtasks)
       this.renderRow(tbody, subtask, allTasks, depth + 1)
 
-    if (this.activeTab === 'active') {
+    if (!this.isArchivedTab() && !this.isPomodoroTab()) {
       const addSubRow = tbody.createEl('tr', { cls: 'tareas-add-row' })
       addSubRow.createEl('td')
       addSubRow.createEl('td')
@@ -1032,7 +1137,7 @@ export class TareasView extends obsidian.ItemView {
       const addSubtask = addSubCell.createEl('span', { text: '+ Subtarea', cls: 'tareas-add-link' })
       addSubtask.onclick = (event) => {
         event.stopPropagation()
-        new NewTaskModal(this.app, this.plugin, task.equipo, task.file.basename).open()
+        new NewTaskModal(this.app, this.plugin, task.tablero, task.file.basename, task.equipo).open()
       }
     }
   }
@@ -1222,7 +1327,8 @@ export class TareasView extends obsidian.ItemView {
   }
 
   private renderCardProgressBand(card: HTMLElement, task: TaskItem) {
-    const band = card.createDiv({ cls: 'tareas-card-progress-band' })
+    const row = card.createDiv({ cls: 'tareas-card-progress-row' })
+    const band = row.createDiv({ cls: 'tareas-card-progress-band' })
     const fill = band.createDiv({ cls: 'tareas-card-progress-band-fill' })
     const text = band.createDiv({ cls: 'tareas-card-progress-band-text' })
     const dedicatedAndEstimatedText = `${this.formatDecimal(task.dedicado)}/${this.formatDecimal(task.estimacion)}`
@@ -1255,6 +1361,30 @@ export class TareasView extends obsidian.ItemView {
 
     if (isOverflow)
       band.addClass('is-overflow')
+
+    const pomodoroButton = row.createEl('button', { cls: 'tareas-card-pomodoro-btn' })
+    const isPomodoroRunning = this.plugin.pomodoro.runState === 'running'
+    pomodoroButton.disabled = isPomodoroRunning
+    pomodoroButton.setAttr('aria-label', 'Abrir Pomodoro con esta tarea')
+    pomodoroButton.setAttr('title', isPomodoroRunning
+      ? 'No se puede vincular una tarea mientras el contador está corriendo'
+      : 'Abrir Pomodoro con esta tarea')
+    obsidian.setIcon(pomodoroButton, 'clock-3')
+    pomodoroButton.onclick = (event) => {
+      event.stopPropagation()
+      this.openPomodoroWithTask(task)
+    }
+  }
+
+  private openPomodoroWithTask(task: TaskItem) {
+    if (this.plugin.pomodoro.runState === 'running') {
+      new obsidian.Notice('No se puede cambiar la tarea mientras el contador está corriendo.')
+      return
+    }
+
+    this.setPomodoroSelectedTaskPath(task.file.path)
+    this.activeTab = TareasView.POMODORO_TAB_ID
+    void this.render()
   }
 
   private editCardDedicatedValue(band: HTMLElement, text: HTMLElement, task: TaskItem) {
@@ -1303,6 +1433,11 @@ export class TareasView extends obsidian.ItemView {
 
   private renderStatusActionsCell(row: HTMLElement, task: TaskItem) {
     const cell = row.createEl('td', { cls: 'tareas-cell-actions' })
+    if (this.isArchivedTab()) {
+      this.renderArchivedActions(cell, task)
+      return
+    }
+
     this.renderStatusActions(cell, task)
   }
 
@@ -1364,6 +1499,98 @@ export class TareasView extends obsidian.ItemView {
 
       await this.updateTask(task, { prioridad: 'Urgente' })
     }
+  }
+
+  private renderArchivedActions(container: HTMLElement, task: TaskItem) {
+    const actions = container.createDiv({ cls: 'tareas-status-actions' })
+
+    const recoverButton = actions.createEl('button', {
+      text: 'Recuperar',
+      cls: 'tareas-status-action-btn',
+    })
+    recoverButton.onclick = async (event) => {
+      event.stopPropagation()
+      await this.recoverArchivedTask(task)
+    }
+
+    const deleteButton = actions.createEl('button', {
+      text: 'Eliminar',
+      cls: 'tareas-status-action-btn is-dismiss',
+    })
+    deleteButton.onclick = (event) => {
+      event.stopPropagation()
+      this.openDeleteTaskConfirm(task)
+    }
+  }
+
+  private async recoverArchivedTask(task: TaskItem) {
+    await this.applyStateTransition(task, 'Pendiente')
+    await this.render()
+  }
+
+  private openDeleteTaskConfirm(task: TaskItem) {
+    const family = this.getTaskFamilyPostOrder(task)
+    const fileCount = family.length
+    const taskLabel = fileCount > 1
+      ? `"${task.tarea}" y ${fileCount - 1} subtarea(s)`
+      : `"${task.tarea}"`
+
+    new ConfirmDeleteTaskModal(this.app, {
+      title: 'Eliminar tarea definitivamente',
+      message: `¿Seguro que querés eliminar ${taskLabel}? Esta acción borra los archivos .md y no se puede deshacer.`,
+      confirmText: 'Aceptar',
+      onConfirm: async () => {
+        await this.deleteTaskFamily(task, family)
+      },
+    }).open()
+  }
+
+  private getTaskFamilyPostOrder(task: TaskItem): TaskItem[] {
+    const allTasks = getTasks(this.app)
+    const byParent = new Map<string, TaskItem[]>()
+    for (const current of allTasks) {
+      if (!current.parent)
+        continue
+
+      const siblings = byParent.get(current.parent) ?? []
+      siblings.push(current)
+      byParent.set(current.parent, siblings)
+    }
+
+    const visitedPaths = new Set<string>()
+    const ordered: TaskItem[] = []
+
+    const visit = (currentTask: TaskItem) => {
+      if (visitedPaths.has(currentTask.file.path))
+        return
+
+      visitedPaths.add(currentTask.file.path)
+      const children = byParent.get(currentTask.file.basename) ?? []
+      for (const child of children)
+        visit(child)
+
+      ordered.push(currentTask)
+    }
+
+    visit(task)
+    return ordered
+  }
+
+  private async deleteTaskFamily(task: TaskItem, family: TaskItem[]) {
+    const selectedTaskPath = this.plugin.pomodoro.selectedTaskPath
+    for (const member of family) {
+      const abstractFile = this.app.vault.getAbstractFileByPath(member.file.path)
+      if (!(abstractFile instanceof obsidian.TFile))
+        continue
+
+      await this.app.vault.delete(abstractFile, true)
+    }
+
+    if (selectedTaskPath && family.some(member => member.file.path === selectedTaskPath))
+      this.setPomodoroSelectedTaskPath(null)
+
+    await this.render()
+    new obsidian.Notice(`Se eliminó "${task.tarea}" de forma definitiva.`)
   }
 
   private async applyStatusAction(task: TaskItem, actionId: string, nextStatus: string) {
@@ -1429,9 +1656,10 @@ export class TareasView extends obsidian.ItemView {
   }
 
   private renderTeamBadge(container: HTMLElement, task: TaskItem) {
-    const teamConfig = this.plugin.equipos.find(item => item.name === task.equipo)
+    const boardGroups = this.plugin.getEquiposForTablero(task.tablero)
+    const teamConfig = boardGroups.find(item => item.name === task.equipo)
     const badge = container.createEl('span', {
-      text: task.equipo || '—',
+      text: task.equipo || 'Sin grupo',
       cls: 'tareas-equipo-badge',
     })
 
@@ -1441,7 +1669,7 @@ export class TareasView extends obsidian.ItemView {
     badge.onclick = (event) => {
       event.stopPropagation()
 
-      const options = this.plugin.equipos.map(equipo => equipo.name)
+      const options = boardGroups.map(equipo => equipo.name)
       showDropdown(badge, options, task.equipo, async (nextTeam) => {
         const previousTeam = task.equipo
         await this.updateTask(task, { equipo: nextTeam })
@@ -1450,8 +1678,8 @@ export class TareasView extends obsidian.ItemView {
         for (const subtask of subtasks)
           await this.updateTask(subtask, { equipo: nextTeam })
 
-        await this.rebalanceTeamSchedule(previousTeam)
-        await this.rebalanceTeamSchedule(nextTeam)
+        await this.rebalanceBoardSchedule(task.tablero, previousTeam)
+        await this.rebalanceBoardSchedule(task.tablero, nextTeam)
       })
     }
   }
@@ -1494,7 +1722,7 @@ export class TareasView extends obsidian.ItemView {
     editable.onclick = () => {
       this.editNumberCell(editable, task.estimacion, async (value) => {
         await this.updateTask(task, { estimacion: value })
-        await this.rebalanceTeamSchedule(task.equipo)
+        await this.rebalanceBoardSchedule(task.tablero, task.equipo)
       })
     }
   }
@@ -1604,7 +1832,9 @@ export class TareasView extends obsidian.ItemView {
       this.dragPath = task.file.path
       this.dragDepth = 0
       this.dragParent = task.parent
+      this.dragInsertPosition = null
       card.addClass('tareas-task-card-dragging')
+      card.addClass('tareas-task-card-drag-preview')
       dataTransfer.effectAllowed = 'move'
       event.stopPropagation()
     })
@@ -1622,12 +1852,10 @@ export class TareasView extends obsidian.ItemView {
       if (event.dataTransfer)
         event.dataTransfer.dropEffect = 'move'
 
-      container.querySelectorAll('.tareas-task-card-drag-over').forEach(item => item.classList.remove('tareas-task-card-drag-over'))
-      card.addClass('tareas-task-card-drag-over')
-    })
-
-    card.addEventListener('dragleave', () => {
-      card.removeClass('tareas-task-card-drag-over')
+      const insertPosition = this.resolveCardInsertPosition(event, card)
+      this.dragInsertPosition = insertPosition
+      this.clearCardDropMarkers()
+      card.addClass(insertPosition === 'before' ? 'tareas-task-card-drag-over-top' : 'tareas-task-card-drag-over-bottom')
     })
 
     card.addEventListener('drop', async (event) => {
@@ -1636,96 +1864,124 @@ export class TareasView extends obsidian.ItemView {
 
       event.preventDefault()
       event.stopPropagation()
-      card.removeClass('tareas-task-card-drag-over')
+      const insertPosition = this.dragInsertPosition ?? this.resolveCardInsertPosition(event, card)
+      card.removeClass('tareas-task-card-drag-over-top')
+      card.removeClass('tareas-task-card-drag-over-bottom')
 
       if (!this.dragPath)
         return
 
-      await this.reorderTask(this.dragPath, task.file.path, allTasks)
+      const dragged = allTasks.find(item => item.file.path === this.dragPath)
+      if (!dragged)
+        return
+
+      this.droppedTaskAnimationPath = this.dragPath
+      if (!dragged.parent && dragged.tablero === task.tablero && dragged.equipo !== task.equipo)
+        await this.moveTaskToGroup(this.dragPath, task.equipo, allTasks, task.file.path, insertPosition)
+      else
+        await this.reorderTask(this.dragPath, task.file.path, allTasks, insertPosition)
+
       this.resetCardDragState(container, card)
     })
   }
 
-  private attachGroupDragHandlers(root: HTMLElement, group: HTMLElement, header: HTMLElement, teamName: string) {
-    header.createEl('span', { text: '⠁⠁⠁', cls: 'tareas-group-drag-handle' })
-    header.draggable = true
-
-    header.addEventListener('dragstart', (event) => {
-      const dataTransfer = event.dataTransfer
-      if (!dataTransfer)
+  private attachGroupCardListDropHandlers(container: HTMLElement, groupName: string, allTasks: TaskItem[]) {
+    container.addEventListener('dragover', (event) => {
+      const dragPath = this.dragPath
+      if (!dragPath)
         return
 
-      this.dragGroup = teamName
-      group.addClass('tareas-group-dragging')
-      dataTransfer.effectAllowed = 'move'
-      event.stopPropagation()
-    })
+      const dragged = allTasks.find(item => item.file.path === dragPath)
+      if (!dragged || dragged.parent)
+        return
 
-    header.addEventListener('dragend', () => {
-      this.dragGroup = null
-      group.removeClass('tareas-group-dragging')
-      root.querySelectorAll('.tareas-group-drag-over').forEach(item => item.classList.remove('tareas-group-drag-over'))
-    })
-
-    group.addEventListener('dragover', (event) => {
-      if (!this.dragGroup || this.dragGroup === teamName)
+      if (dragged.tablero !== this.activeTab || dragged.equipo === groupName)
         return
 
       event.preventDefault()
       event.stopPropagation()
-      root.querySelectorAll('.tareas-group-drag-over').forEach(item => item.classList.remove('tareas-group-drag-over'))
-      group.addClass('tareas-group-drag-over')
+      if (event.dataTransfer)
+        event.dataTransfer.dropEffect = 'move'
+
+      container.addClass('tareas-card-list-drop-target')
     })
 
-    group.addEventListener('dragleave', (event) => {
-      if (event.relatedTarget instanceof Node && group.contains(event.relatedTarget))
+    container.addEventListener('dragleave', (event) => {
+      if (event.relatedTarget instanceof Node && container.contains(event.relatedTarget))
         return
 
-      group.removeClass('tareas-group-drag-over')
+      container.removeClass('tareas-card-list-drop-target')
     })
 
-    group.addEventListener('drop', (event) => {
+    container.addEventListener('drop', async (event) => {
+      const dragPath = this.dragPath
+      if (!dragPath)
+        return
+
+      const markerCard = container.querySelector('.tareas-task-card-drag-over-top, .tareas-task-card-drag-over-bottom')
+      const markerTargetPath = markerCard instanceof HTMLElement ? markerCard.dataset.path ?? null : null
+      const markerInsertPosition: 'before' | 'after' | null = markerCard instanceof HTMLElement
+        ? (markerCard.classList.contains('tareas-task-card-drag-over-top') ? 'before' : 'after')
+        : null
+
+      const targetCard = (event.target as HTMLElement | null)?.closest('.tareas-task-card')
+      if (targetCard && !targetCard.classList.contains('tareas-task-card-add'))
+        return
+
+      const dragged = allTasks.find(item => item.file.path === dragPath)
+      if (!dragged || dragged.parent)
+        return
+
+      if (dragged.tablero !== this.activeTab)
+        return
+
       event.preventDefault()
       event.stopPropagation()
-      group.removeClass('tareas-group-drag-over')
+      container.removeClass('tareas-card-list-drop-target')
+      this.droppedTaskAnimationPath = dragPath
 
-      if (!this.dragGroup || this.dragGroup === teamName)
-        return
+      if (markerTargetPath && markerInsertPosition) {
+        if (dragged.equipo === groupName)
+          await this.reorderTask(dragPath, markerTargetPath, allTasks, markerInsertPosition)
+        else
+          await this.moveTaskToGroup(dragPath, groupName, allTasks, markerTargetPath, markerInsertPosition)
+      }
+      else if (dragged.equipo !== groupName) {
+        await this.moveTaskToGroup(dragPath, groupName, allTasks)
+      }
 
-      this.reorderGroup(this.dragGroup, teamName)
-      this.dragGroup = null
+      this.dragPath = null
+      this.dragDepth = null
+      this.dragParent = null
+      this.dragInsertPosition = null
+      this.clearCardDropMarkers()
     })
   }
 
-  private reorderGroup(draggedName: string, targetName: string) {
-    const current = this.plugin.equipos
-    const fromIndex = current.findIndex(item => item.name === draggedName)
-    const toIndex = current.findIndex(item => item.name === targetName)
-
-    if (fromIndex < 0 || toIndex < 0)
-      return
-
-    this.plugin.equipos = reorderList(current, fromIndex, toIndex)
-    void this.plugin.saveSettings()
-    this.render()
-  }
-
-  private async reorderTask(draggedPath: string, targetPath: string, allTasks: TaskItem[]) {
+  private async reorderTask(draggedPath: string, targetPath: string, allTasks: TaskItem[], insertPosition: 'before' | 'after' | null = null) {
     const dragged = allTasks.find(task => task.file.path === draggedPath)
     const target = allTasks.find(task => task.file.path === targetPath)
     if (!dragged || !target)
       return
 
     const siblings = allTasks
-      .filter(task => !task.parent && task.equipo === dragged.equipo)
+      .filter(task => !task.parent && task.tablero === dragged.tablero && task.equipo === dragged.equipo)
       .sort((a, b) => a.order - b.order)
 
     const fromIndex = siblings.findIndex(item => item.file.path === draggedPath)
     const toIndex = siblings.findIndex(item => item.file.path === targetPath)
 
-    const nextOrder = reorderList(siblings, fromIndex, toIndex)
+    let nextIndex = toIndex
+    if (insertPosition) {
+      nextIndex = toIndex + (insertPosition === 'after' ? 1 : 0)
+      if (fromIndex < nextIndex)
+        nextIndex -= 1
+    }
+
+    const nextOrder = reorderList(siblings, fromIndex, nextIndex)
     await persistTaskOrder(nextOrder, async (task, order) => this.updateTask(task, { order }))
-    await this.rebalanceTeamSchedule(dragged.equipo)
+    await this.rebalanceBoardSchedule(dragged.tablero, dragged.equipo)
+    await this.render()
   }
 
   private async reorderSubtask(draggedPath: string, targetPath: string, allTasks: TaskItem[]) {
@@ -1745,6 +2001,75 @@ export class TareasView extends obsidian.ItemView {
     await persistTaskOrder(nextOrder, async (task, order) => this.updateTask(task, { order }))
   }
 
+  private async moveTaskToGroup(
+    draggedPath: string,
+    targetGroup: string,
+    allTasks: TaskItem[],
+    targetPath: string | null = null,
+    insertPosition: 'before' | 'after' = 'after',
+  ) {
+    const dragged = allTasks.find(task => task.file.path === draggedPath)
+    if (!dragged || dragged.parent)
+      return
+
+    const previousGroup = dragged.equipo
+    await this.updateTask(dragged, { equipo: targetGroup })
+
+    const subtasks = allTasks.filter(task => task.parent === dragged.file.basename)
+    for (const subtask of subtasks)
+      await this.updateTask(subtask, { equipo: targetGroup })
+
+    if (!targetPath) {
+      const nextOrder = this.resolveNextOrderForGroup(allTasks, dragged.tablero, targetGroup, draggedPath)
+      await this.updateTask(dragged, { order: nextOrder })
+    }
+    else {
+      const siblings = allTasks
+        .filter(task => !task.parent && task.tablero === dragged.tablero && task.equipo === targetGroup && task.file.path !== draggedPath)
+        .sort((a, b) => a.order - b.order)
+
+      const targetIndex = siblings.findIndex(item => item.file.path === targetPath)
+      if (targetIndex < 0) {
+        const nextOrder = this.resolveNextOrderForGroup(allTasks, dragged.tablero, targetGroup, draggedPath)
+        await this.updateTask(dragged, { order: nextOrder })
+      }
+      else {
+        const insertIndex = targetIndex + (insertPosition === 'after' ? 1 : 0)
+        const nextOrder = [...siblings]
+        nextOrder.splice(insertIndex, 0, dragged)
+        await persistTaskOrder(nextOrder, async (task, order) => this.updateTask(task, { order }))
+      }
+    }
+
+    await this.rebalanceBoardSchedule(dragged.tablero, previousGroup)
+    await this.rebalanceBoardSchedule(dragged.tablero, targetGroup)
+    await this.render()
+  }
+
+  private resolveCardInsertPosition(event: DragEvent, card: HTMLElement): 'before' | 'after' {
+    const bounds = card.getBoundingClientRect()
+    const midpoint = bounds.top + (bounds.height / 2)
+    return event.clientY < midpoint ? 'before' : 'after'
+  }
+
+  private clearCardDropMarkers() {
+    const root = this.getRootEl()
+    root.querySelectorAll('.tareas-task-card-drag-over').forEach(item => item.classList.remove('tareas-task-card-drag-over'))
+    root.querySelectorAll('.tareas-task-card-drag-over-top').forEach(item => item.classList.remove('tareas-task-card-drag-over-top'))
+    root.querySelectorAll('.tareas-task-card-drag-over-bottom').forEach(item => item.classList.remove('tareas-task-card-drag-over-bottom'))
+  }
+
+  private resolveNextOrderForGroup(allTasks: TaskItem[], boardName: string, groupName: string, excludePath: string): number {
+    const siblingOrders = allTasks
+      .filter(task => !task.parent && task.tablero === boardName && task.equipo === groupName && task.file.path !== excludePath)
+      .map(task => Number.isFinite(task.order) ? task.order : 0)
+
+    if (siblingOrders.length === 0)
+      return ORDER_STEP
+
+    return Math.max(...siblingOrders) + ORDER_STEP
+  }
+
   private async updateTask(task: TaskItem, updates: Partial<TaskFrontmatter>) {
     await updateFrontmatter(this.app, task.file, updates)
   }
@@ -1760,11 +2085,14 @@ export class TareasView extends obsidian.ItemView {
 
     const shouldMoveFile = options?.moveFile ?? true
     const shouldSyncSubtasks = options?.syncSubtasksWithParent ?? true
-    const isInCompletedFolder = isTaskInCompletedFolder(task.file.path)
-    if (shouldMoveFile && nextStatus === 'Finalizada' && !isInCompletedFolder)
+    const isInArchivedFolder = isTaskInCompletedFolder(task.file.path)
+    if (shouldMoveFile && nextStatus === 'Finalizada')
       await moveTaskToCompletedFolder(this.app, task.file, Boolean(task.parent))
 
-    if (shouldMoveFile && nextStatus !== 'Finalizada' && isInCompletedFolder)
+    if (shouldMoveFile && nextStatus === 'Cancelada')
+      await moveTaskToCancelledFolder(this.app, task.file, Boolean(task.parent))
+
+    if (shouldMoveFile && nextStatus !== 'Finalizada' && nextStatus !== 'Cancelada' && isInArchivedFolder)
       await moveTaskToActiveFolder(this.app, task.file, Boolean(task.parent))
 
     if (shouldMoveFile && shouldSyncSubtasks && !task.parent) {
@@ -1772,25 +2100,31 @@ export class TareasView extends obsidian.ItemView {
         await this.updateSubtasksStatusForParent(task.file.basename, 'En progreso')
 
       if (nextStatus === 'Finalizada')
-        await this.moveSubtasksForParent(task.file.basename, true)
+        await this.moveSubtasksForParent(task.file.basename, 'Finalizada')
 
-      if (nextStatus !== 'Finalizada' && isInCompletedFolder)
-        await this.moveSubtasksForParent(task.file.basename, false)
+      if (nextStatus === 'Cancelada')
+        await this.moveSubtasksForParent(task.file.basename, 'Cancelada')
+
+      if (nextStatus !== 'Finalizada' && nextStatus !== 'Cancelada' && isInArchivedFolder)
+        await this.moveSubtasksForParent(task.file.basename, null)
     }
 
-    if (nextStatus === 'Finalizada' || isInCompletedFolder)
-      await this.rebalanceTeamSchedule(task.equipo)
+    if (nextStatus === 'Finalizada' || nextStatus === 'Cancelada' || isInArchivedFolder)
+      await this.rebalanceBoardSchedule(task.tablero, task.equipo)
   }
 
-  private async moveSubtasksForParent(parentTaskName: string, toCompleted: boolean) {
+  private async moveSubtasksForParent(parentTaskName: string, nextTerminalStatus: 'Finalizada' | 'Cancelada' | null) {
     const subtasks = getTasks(this.app).filter(item => item.parent === parentTaskName)
 
     for (const subtask of subtasks) {
-      if (toCompleted) {
-        if (subtask.estado !== 'Finalizada')
-          await this.updateTask(subtask, { estado: 'Finalizada' })
+      if (nextTerminalStatus) {
+        if (subtask.estado !== nextTerminalStatus)
+          await this.updateTask(subtask, { estado: nextTerminalStatus })
 
-        await moveTaskToCompletedFolder(this.app, subtask.file, true)
+        if (nextTerminalStatus === 'Finalizada')
+          await moveTaskToCompletedFolder(this.app, subtask.file, true)
+        else
+          await moveTaskToCancelledFolder(this.app, subtask.file, true)
       }
       else {
         await moveTaskToActiveFolder(this.app, subtask.file, true)
@@ -1809,11 +2143,11 @@ export class TareasView extends obsidian.ItemView {
     }
   }
 
-  private async rebalanceTeamSchedule(teamName: string) {
-    if (!teamName)
+  private async rebalanceBoardSchedule(boardName: string, groupName: string) {
+    if (!boardName || !groupName)
       return
 
-    await rebalanceGroupEndDates(this.app, teamName)
+    await rebalanceGroupEndDates(this.app, boardName, groupName)
   }
 
   private canDropOnRow(target: TaskItem, depth: number) {
@@ -1836,8 +2170,11 @@ export class TareasView extends obsidian.ItemView {
     this.dragPath = null
     this.dragDepth = null
     this.dragParent = null
+    this.dragInsertPosition = null
     card.removeClass('tareas-task-card-dragging')
-    container.querySelectorAll('.tareas-task-card-drag-over').forEach(item => item.classList.remove('tareas-task-card-drag-over'))
+    card.removeClass('tareas-task-card-drag-preview')
+    this.clearCardDropMarkers()
+    this.getRootEl().querySelectorAll('.tareas-card-list-drop-target').forEach(item => item.classList.remove('tareas-card-list-drop-target'))
   }
 
   private getRootEl(): HTMLElement {

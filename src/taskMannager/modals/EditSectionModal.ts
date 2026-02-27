@@ -9,13 +9,15 @@ import { createColorPicker } from '../ui/colorPicker'
 export class EditSectionModal extends obsidian.Modal {
   private plugin: TareasPlugin
   private eqObj: Equipo
+  private boardName: string
   private view: TareasViewHandle
   private data: { name: string, color: string }
 
-  constructor(app: obsidian.App, plugin: TareasPlugin, eqObj: Equipo, view: TareasViewHandle) {
+  constructor(app: obsidian.App, plugin: TareasPlugin, eqObj: Equipo, view: TareasViewHandle, boardName: string) {
     super(app)
     this.plugin = plugin
     this.eqObj = eqObj
+    this.boardName = boardName
     this.view = view
     this.data = { name: eqObj.name, color: eqObj.color }
   }
@@ -72,11 +74,11 @@ export class EditSectionModal extends obsidian.Modal {
     }
 
     if (newName !== oldName)
-      await renameTeamInTasks(this.app, oldName, newName)
+      await renameTeamInTasks(this.app, oldName, newName, this.boardName)
 
-    this.plugin.updateEquipo(oldName, { name: newName, color: this.data.color })
-    this.view.expandedGroups.delete(oldName)
-    this.view.expandedGroups.add(newName)
+    this.plugin.updateEquipo(oldName, this.boardName, { name: newName, color: this.data.color })
+    this.view.expandedGroups.delete(`${this.boardName}::${oldName}`)
+    this.view.expandedGroups.add(`${this.boardName}::${newName}`)
     this.view.render()
     this.close()
   }
@@ -87,14 +89,14 @@ export class EditSectionModal extends obsidian.Modal {
       return
     }
 
-    const taskCount = countTopLevelTeamTasks(this.app, this.eqObj.name)
+    const taskCount = countTopLevelTeamTasks(this.app, this.eqObj.name, this.boardName)
     if (taskCount > 0) {
       new obsidian.Notice(`La sección "${this.eqObj.name}" tiene ${taskCount} tarea(s). Movalas a otra sección antes de eliminar.`)
       return
     }
 
-    this.plugin.removeEquipo(this.eqObj.name)
-    this.view.expandedGroups.delete(this.eqObj.name)
+    this.plugin.removeEquipo(this.eqObj.name, this.boardName)
+    this.view.expandedGroups.delete(`${this.boardName}::${this.eqObj.name}`)
     this.view.render()
     new obsidian.Notice(`Sección "${this.eqObj.name}" eliminada`)
     this.close()

@@ -1,4 +1,4 @@
-import { TFile, type App } from 'obsidian'
+import { TFile, TFolder, type App } from 'obsidian'
 
 import { POMODORO_LOG_BASENAME, TAREAS_FOLDER } from '../constants'
 
@@ -104,8 +104,16 @@ function toLocalTimeText(date: Date): string {
 
 async function ensurePomodoroLogFile(app: App) {
   const folder = app.vault.getAbstractFileByPath(TAREAS_FOLDER)
-  if (!folder)
-    await app.vault.createFolder(TAREAS_FOLDER)
+  if (!folder) {
+    try {
+      await app.vault.createFolder(TAREAS_FOLDER)
+    }
+    catch {
+      const retry = app.vault.getAbstractFileByPath(TAREAS_FOLDER)
+      if (!(retry instanceof TFolder))
+        throw new Error(`No se pudo crear la carpeta "${TAREAS_FOLDER}".`)
+    }
+  }
 
   const existing = app.vault.getAbstractFileByPath(POMODORO_LOG_PATH)
   if (existing)

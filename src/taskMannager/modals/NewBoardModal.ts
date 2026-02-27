@@ -5,27 +5,25 @@ import type { TareasPlugin } from '../plugin/TareasPlugin'
 import type { TareasViewHandle } from '../types'
 import { createColorPicker } from '../ui/colorPicker'
 
-export class NewGroupModal extends obsidian.Modal {
+export class NewBoardModal extends obsidian.Modal {
   private plugin: TareasPlugin
   private view: TareasViewHandle
-  private boardName: string
   private data: { name: string, color: string }
 
-  constructor(app: obsidian.App, plugin: TareasPlugin, view: TareasViewHandle, boardName: string) {
+  constructor(app: obsidian.App, plugin: TareasPlugin, view: TareasViewHandle) {
     super(app)
     this.plugin = plugin
     this.view = view
-    this.boardName = boardName
-    this.data = { name: '', color: PRESET_COLORS[2] }
+    this.data = { name: '', color: PRESET_COLORS[1] }
   }
 
   onOpen() {
     const { contentEl } = this
     contentEl.addClass('tareas-modal')
-    contentEl.createEl('h2', { text: 'Nuevo Grupo' })
+    contentEl.createEl('h2', { text: 'Nuevo Tablero' })
 
-    new obsidian.Setting(contentEl).setName('Nombre del grupo').addText((text) => {
-      text.setPlaceholder('Ej: Backend, Frontend, QA')
+    new obsidian.Setting(contentEl).setName('Nombre del tablero').addText((text) => {
+      text.setPlaceholder('Ej: personal, estudio, trabajo')
       text.onChange(value => this.data.name = value)
       setTimeout(() => text.inputEl.focus(), 50)
     })
@@ -36,9 +34,8 @@ export class NewGroupModal extends obsidian.Modal {
     })
 
     const footer = contentEl.createDiv({ cls: 'tareas-modal-footer' })
-
-    const createButton = footer.createEl('button', { text: 'Crear grupo', cls: 'mod-cta' })
-    createButton.onclick = () => this.createGroup()
+    const createButton = footer.createEl('button', { text: 'Crear tablero', cls: 'mod-cta' })
+    createButton.onclick = () => this.createBoard()
 
     const cancelButton = footer.createEl('button', { text: 'Cancelar' })
     cancelButton.onclick = () => this.close()
@@ -48,17 +45,16 @@ export class NewGroupModal extends obsidian.Modal {
     this.contentEl.empty()
   }
 
-  private createGroup() {
-    const groupName = this.data.name.trim()
-    if (!groupName) {
+  private createBoard() {
+    const boardName = this.data.name.trim()
+    if (!boardName) {
       new obsidian.Notice('El nombre es requerido')
       return
     }
 
-    this.plugin.addEquipoInTablero(groupName, this.data.color, this.boardName)
+    this.plugin.addTablero(boardName, this.data.color)
     this.view.render()
-
-    new obsidian.Notice(`Grupo "${groupName}" creado`)
+    new obsidian.Notice(`Tablero "${boardName}" creado`)
     this.close()
   }
 }

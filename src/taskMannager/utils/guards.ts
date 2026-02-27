@@ -20,6 +20,8 @@ export function toTaskFrontmatter(value: unknown): TaskFrontmatter | null {
     frontmatter.fechaInicio = value.fechaInicio
   if (typeof value.fechaFin === 'string')
     frontmatter.fechaFin = value.fechaFin
+  if (typeof value.tablero === 'string')
+    frontmatter.tablero = value.tablero
   if (typeof value.equipo === 'string')
     frontmatter.equipo = value.equipo
   if (typeof value.prioridad === 'string')

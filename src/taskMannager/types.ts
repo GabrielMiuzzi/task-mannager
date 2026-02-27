@@ -3,6 +3,7 @@ import type { TFile } from 'obsidian'
 export interface Equipo {
   name: string
   color: string
+  tablero?: string
 }
 
 export interface TaskItem {
@@ -12,6 +13,7 @@ export interface TaskItem {
   estado: string
   fechaInicio: string
   fechaFin: string
+  tablero: string
   equipo: string
   prioridad: string
   dedicado: number
@@ -27,6 +29,7 @@ export interface TaskFrontmatter {
   estado?: string
   fechaInicio?: string
   fechaFin?: string
+  tablero?: string
   equipo?: string
   prioridad?: string
   dedicado?: number | string
@@ -43,6 +46,7 @@ export interface TaskFormData {
   detalle: string
   estado: string
   fechaFin: string
+  tablero: string
   equipo: string
   prioridad: string
   estimacion: number
@@ -78,6 +82,7 @@ export interface TareasViewHandle {
 }
 
 export interface PluginSettingsData {
+  tableros?: Equipo[] | string[]
   equipos?: Equipo[] | string[]
   pomodoro?: unknown
 }

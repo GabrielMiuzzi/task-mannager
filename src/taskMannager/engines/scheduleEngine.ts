@@ -5,9 +5,12 @@ import { updateFrontmatter } from './frontmatterEngine'
 
 const HOUR_MS = 60 * 60 * 1000
 
-export async function rebalanceGroupEndDates(app: App, teamName: string): Promise<void> {
+export async function rebalanceGroupEndDates(app: App, boardName: string, groupName: string): Promise<void> {
   const tasks = getTasks(app)
-    .filter(task => !task.parent && task.equipo === teamName && !isTaskInCompletedFolder(task.file.path))
+    .filter(task => !task.parent
+      && task.tablero === boardName
+      && task.equipo === groupName
+      && !isTaskInCompletedFolder(task.file.path))
     .sort((a, b) => a.order - b.order)
 
   if (tasks.length === 0)

@@ -1,6 +1,10 @@
 import type { App, TFile } from 'obsidian'
 
 import {
+  DEFAULT_BOARD_NAME,
+  CANCELLED_SUBTASKS_FOLDER,
+  CANCELLED_TASK_INDEX_BASENAME,
+  CANCELLED_TASKS_FOLDER,
   COMPLETED_SUBTASKS_FOLDER,
   COMPLETED_TASKS_FOLDER,
   FINISHED_TASK_INDEX_BASENAME,
@@ -9,9 +13,9 @@ import {
   TASK_INDEX_BASENAME,
   TASK_TAG,
   ORDER_STEP,
-  SUBTASKS_FOLDER,
   TAREAS_FOLDER,
 } from '../constants'
+import { isBoardTaskIndexPath } from './taskIndexEngine'
 import type { Equipo, TaskFormData, TaskFrontmatter, TaskItem } from '../types'
 import { toTaskFrontmatter } from '../utils/guards'
 import { normalizeEstado } from '../utils/status'
@@ -20,13 +24,25 @@ export function getTaskFiles(app: App) {
   return app.vault
     .getMarkdownFiles()
     .filter(file => file.path.startsWith(`${TAREAS_FOLDER}/`))
-    .filter(file => file.basename !== TASK_INDEX_BASENAME && file.basename !== FINISHED_TASK_INDEX_BASENAME)
+    .filter(file => file.basename !== TASK_INDEX_BASENAME
+      && file.basename !== FINISHED_TASK_INDEX_BASENAME
+      && file.basename !== CANCELLED_TASK_INDEX_BASENAME
+      && !isBoardTaskIndexPath(file.path))
 }
 
-export function isTaskInCompletedFolder(path: string): boolean {
+export function isTaskInFinishedFolder(path: string): boolean {
   return path.startsWith(`${COMPLETED_TASKS_FOLDER}/`)
     || path.startsWith(`${COMPLETED_SUBTASKS_FOLDER}/`)
     || path.startsWith(`${LEGACY_COMPLETED_TASKS_FOLDER}/`)
+}
+
+export function isTaskInCancelledFolder(path: string): boolean {
+  return path.startsWith(`${CANCELLED_TASKS_FOLDER}/`)
+    || path.startsWith(`${CANCELLED_SUBTASKS_FOLDER}/`)
+}
+
+export function isTaskInCompletedFolder(path: string): boolean {
+  return isTaskInFinishedFolder(path) || isTaskInCancelledFolder(path)
 }
 
 export function getTasks(app: App): TaskItem[] {
@@ -44,6 +60,7 @@ export function getTasks(app: App): TaskItem[] {
       estado: normalizeEstado(fm.estado),
       fechaInicio: fm.fechaInicio ?? '',
       fechaFin: fm.fechaFin ?? '',
+      tablero: resolveTaskBoard(file.path, fm),
       equipo: fm.equipo ?? '',
       prioridad: fm.prioridad ?? '',
       dedicado: Number(fm.dedicado) || 0,
@@ -67,11 +84,11 @@ export function groupTopLevelTasks(tasks: TaskItem[], equipos: Equipo[]) {
     if (task.parent)
       continue
 
-    const teamName = task.equipo || 'Sin equipo'
-    if (!groups[teamName])
-      groups[teamName] = []
+    const groupName = task.equipo || 'Sin grupo'
+    if (!groups[groupName])
+      groups[groupName] = []
 
-    groups[teamName].push(task)
+    groups[groupName].push(task)
   }
 
   return groups
@@ -92,6 +109,7 @@ export function buildTaskContent(data: TaskFormData, order: number): string {
     `estado: "${data.estado}"`,
     'fechaInicio: ""',
     `fechaFin: "${safeEndDate}"`,
+    `tablero: "${data.tablero}"`,
     `equipo: "${data.equipo}"`,
     `prioridad: "${data.prioridad}"`,
     'dedicado: 0',
@@ -117,7 +135,14 @@ export function resolveNewTaskOrder(app: App, data: TaskFormData): number {
   const siblingOrders = getTaskFiles(app)
     .map(file => getTaskFrontmatter(app, file))
     .filter((fm): fm is TaskFrontmatter => Boolean(fm))
-    .filter(fm => !fm.parent && fm.equipo === data.equipo)
+    .filter((fm) => {
+      if (fm.parent)
+        return false
+
+      const boardName = normalizeBoardName(fm.tablero || '')
+      const groupName = (fm.equipo || '').trim()
+      return boardName === normalizeBoardName(data.tablero) && groupName === data.equipo
+    })
     .map(fm => Number(fm.order) || 0)
 
   if (siblingOrders.length === 0)
@@ -128,13 +153,45 @@ export function resolveNewTaskOrder(app: App, data: TaskFormData): number {
     : Math.max(...siblingOrders) + ORDER_STEP
 }
 
-export function resolveTaskPath(app: App, taskName: string, parentTaskName = ''): string {
-  const folderPath = parentTaskName.trim() ? SUBTASKS_FOLDER : TAREAS_FOLDER
+export function resolveTaskPath(app: App, taskName: string, boardName: string, parentTaskName = ''): string {
+  const folderPath = parentTaskName.trim()
+    ? getBoardSubtasksFolder(boardName)
+    : getBoardFolder(boardName)
   const basePath = `${folderPath}/${taskName}.md`
   if (!app.vault.getAbstractFileByPath(basePath))
     return basePath
 
   return `${folderPath}/${taskName} ${Date.now()}.md`
+}
+
+export function getBoardFolder(boardName: string): string {
+  return `${TAREAS_FOLDER}/${normalizeBoardName(boardName)}`
+}
+
+export function getBoardSubtasksFolder(boardName: string): string {
+  return `${getBoardFolder(boardName)}/subTasks`
+}
+
+function resolveTaskBoard(path: string, fm: TaskFrontmatter): string {
+  const rawFromFrontmatter = (fm.tablero || '').trim().toLowerCase()
+  if (rawFromFrontmatter)
+    return rawFromFrontmatter
+
+  const rootPrefix = `${TAREAS_FOLDER}/`
+  if (!path.startsWith(rootPrefix))
+    return DEFAULT_BOARD_NAME
+
+  const segments = path.slice(rootPrefix.length).split('/')
+  const candidate = segments[0]?.trim().toLowerCase() || ''
+  if (!candidate || candidate === 'finished' || candidate === 'cancelled' || candidate === 'completadas')
+    return DEFAULT_BOARD_NAME
+
+  return candidate
+}
+
+function normalizeBoardName(value: string): string {
+  const normalized = value.trim().toLowerCase()
+  return normalized || DEFAULT_BOARD_NAME
 }
 
 export function resolveTaskEndDate(fechaFin: string, estimacion: number): string {

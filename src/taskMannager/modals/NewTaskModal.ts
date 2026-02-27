@@ -1,10 +1,17 @@
 import * as obsidian from 'obsidian'
 
-import { ESTADOS, PRIORIDADES, SUBTASKS_FOLDER, TAREAS_FOLDER } from '../constants'
+import { ESTADOS, PRIORIDADES } from '../constants'
 import { rebuildTaskChildLinks, syncTaskTypeTags } from '../engines/frontmatterEngine'
 import { rebalanceGroupEndDates } from '../engines/scheduleEngine'
 import { appendTaskLinkToIndex } from '../engines/taskIndexEngine'
-import { buildTaskContent, resolveNewTaskOrder, resolveTaskEndDate, resolveTaskPath } from '../engines/taskEngine'
+import {
+  buildTaskContent,
+  getBoardFolder,
+  getBoardSubtasksFolder,
+  resolveNewTaskOrder,
+  resolveTaskEndDate,
+  resolveTaskPath,
+} from '../engines/taskEngine'
 import type { TaskFormData } from '../types'
 import { sanitizeFilename } from '../utils/sanitizeFilename'
 import type { TareasPlugin } from '../plugin/TareasPlugin'
@@ -13,15 +20,18 @@ export class NewTaskModal extends obsidian.Modal {
   private plugin: TareasPlugin
   private data: TaskFormData
 
-  constructor(app: obsidian.App, plugin: TareasPlugin, defaultEquipo?: string, defaultParent?: string) {
+  constructor(app: obsidian.App, plugin: TareasPlugin, defaultBoard?: string, defaultParent?: string, defaultGroup?: string) {
     super(app)
+    const resolvedBoard = defaultBoard || plugin.tableros[0]?.name || ''
+    const firstGroupForBoard = plugin.getEquiposForTablero(resolvedBoard)[0]?.name || ''
     this.plugin = plugin
     this.data = {
       tarea: '',
       detalle: '',
       estado: 'Pendiente',
       fechaFin: '',
-      equipo: defaultEquipo || plugin.equipos[0]?.name || '',
+      tablero: resolvedBoard,
+      equipo: defaultGroup || firstGroupForBoard,
       prioridad: 'Media',
       estimacion: 0,
       parent: defaultParent || '',
@@ -56,11 +66,44 @@ export class NewTaskModal extends obsidian.Modal {
         text.onChange(value => this.data.fechaFin = value)
       })
 
-    new obsidian.Setting(contentEl).setName('Equipo').addDropdown((dropdown) => {
-      for (const equipo of this.plugin.equipos)
-        dropdown.addOption(equipo.name, equipo.name)
+    let groupDropdown: obsidian.DropdownComponent | null = null
 
-      dropdown.setValue(this.data.equipo)
+    const refreshGroupOptions = () => {
+      if (!groupDropdown)
+        return
+
+      const selectEl = groupDropdown.selectEl
+      while (selectEl.options.length > 0)
+        selectEl.remove(0)
+
+      groupDropdown.addOption('', 'Sin grupo')
+      const groups = this.plugin.getEquiposForTablero(this.data.tablero)
+      for (const equipo of groups)
+        groupDropdown.addOption(equipo.name, equipo.name)
+
+      if (this.data.equipo && groups.some(group => group.name === this.data.equipo)) {
+        groupDropdown.setValue(this.data.equipo)
+        return
+      }
+
+      this.data.equipo = groups[0]?.name || ''
+      groupDropdown.setValue(this.data.equipo)
+    }
+
+    new obsidian.Setting(contentEl).setName('Tablero').addDropdown((dropdown) => {
+      for (const tablero of this.plugin.tableros)
+        dropdown.addOption(tablero.name, tablero.name)
+
+      dropdown.setValue(this.data.tablero)
+      dropdown.onChange((value) => {
+        this.data.tablero = value
+        refreshGroupOptions()
+      })
+    })
+
+    new obsidian.Setting(contentEl).setName('Grupo').addDropdown((dropdown) => {
+      groupDropdown = dropdown
+      refreshGroupOptions()
       dropdown.onChange(value => this.data.equipo = value)
     })
 
@@ -116,10 +159,12 @@ export class NewTaskModal extends obsidian.Modal {
     }
 
     const sanitizedTaskName = sanitizeFilename(this.data.tarea)
-    const targetFolder = this.data.parent.trim() ? SUBTASKS_FOLDER : TAREAS_FOLDER
+    const targetFolder = this.data.parent.trim()
+      ? getBoardSubtasksFolder(this.data.tablero)
+      : getBoardFolder(this.data.tablero)
     await this.ensureFolderPath(targetFolder)
 
-    const path = resolveTaskPath(this.app, sanitizedTaskName, this.data.parent)
+    const path = resolveTaskPath(this.app, sanitizedTaskName, this.data.tablero, this.data.parent)
     const order = resolveNewTaskOrder(this.app, this.data)
     const content = buildTaskContent(
       {
@@ -133,7 +178,7 @@ export class NewTaskModal extends obsidian.Modal {
     await appendTaskLinkToIndex(this.app, taskFile)
     await rebuildTaskChildLinks(this.app)
     await syncTaskTypeTags(this.app)
-    await rebalanceGroupEndDates(this.app, this.data.equipo)
+    await rebalanceGroupEndDates(this.app, this.data.tablero, this.data.equipo)
     new obsidian.Notice(`Tarea "${this.data.tarea}" creada`)
     this.close()
   }
@@ -156,7 +201,16 @@ export class NewTaskModal extends obsidian.Modal {
       if (current)
         throw new Error(`No se pudo crear la carpeta "${currentPath}" porque existe un archivo con ese nombre`)
 
-      await this.app.vault.createFolder(currentPath)
+      try {
+        await this.app.vault.createFolder(currentPath)
+      }
+      catch {
+        const retry = this.app.vault.getAbstractFileByPath(currentPath)
+        if (retry instanceof obsidian.TFolder)
+          continue
+
+        throw new Error(`No se pudo crear la carpeta "${currentPath}"`)
+      }
     }
   }
 }
