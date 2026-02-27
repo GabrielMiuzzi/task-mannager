@@ -221,6 +221,74 @@ export class TareasPlugin extends obsidian.Plugin {
     return this.equipos.filter(equipo => (equipo.tablero || 'default') === normalizedBoardName)
   }
 
+  async reorderEquipoInTablero(
+    boardName: string,
+    draggedGroupName: string,
+    targetGroupName: string,
+    insertPosition: 'before' | 'after',
+  ): Promise<boolean> {
+    const normalizedBoardName = boardName.trim().toLowerCase()
+    if (!normalizedBoardName)
+      return false
+
+    const boardGroups = this.getEquiposForTablero(normalizedBoardName)
+    const fromIndex = boardGroups.findIndex(group => group.name === draggedGroupName)
+    const targetIndex = boardGroups.findIndex(group => group.name === targetGroupName)
+    if (fromIndex < 0 || targetIndex < 0 || fromIndex === targetIndex)
+      return false
+
+    const nextBoardGroups = [...boardGroups]
+    const [dragged] = nextBoardGroups.splice(fromIndex, 1)
+    let nextIndex = nextBoardGroups.findIndex(group => group.name === targetGroupName)
+    if (nextIndex < 0)
+      return false
+
+    if (insertPosition === 'after')
+      nextIndex += 1
+
+    nextBoardGroups.splice(nextIndex, 0, dragged)
+
+    const orderedGroupNames = nextBoardGroups.map(group => group.name)
+    return this.setEquiposOrderForTablero(normalizedBoardName, orderedGroupNames)
+  }
+
+  async setEquiposOrderForTablero(boardName: string, orderedGroupNames: string[]): Promise<boolean> {
+    const normalizedBoardName = boardName.trim().toLowerCase()
+    if (!normalizedBoardName)
+      return false
+
+    const boardGroups = this.getEquiposForTablero(normalizedBoardName)
+    if (boardGroups.length === 0)
+      return false
+
+    const uniqueOrderedNames = Array.from(new Set(orderedGroupNames))
+    if (uniqueOrderedNames.length !== boardGroups.length)
+      return false
+
+    const orderedGroupByName = new Map(boardGroups.map(group => [group.name, group]))
+    const nextBoardGroups: Equipo[] = []
+    for (const groupName of uniqueOrderedNames) {
+      const group = orderedGroupByName.get(groupName)
+      if (!group)
+        return false
+
+      nextBoardGroups.push(group)
+    }
+
+    let boardPointer = 0
+    this.equipos = this.equipos.map((equipo) => {
+      if ((equipo.tablero || 'default') !== normalizedBoardName)
+        return equipo
+
+      const replacement = nextBoardGroups[boardPointer]
+      boardPointer += 1
+      return replacement || equipo
+    })
+
+    await this.saveSettings()
+    return true
+  }
+
   private async ensureTasksFolder() {
     try {
       await this.ensureFolderPath(TAREAS_FOLDER)

@@ -166,18 +166,19 @@
 .tareas-pomodoro-heatmap-count { display:block; font-size:12px; font-weight:700; line-height:1.2; margin-top:2px; color:var(--text-normal); }
 
 .tareas-board { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(280px, 320px); gap:var(--tareas-size-sm); overflow-x:auto; align-items:start; padding:var(--tareas-radius-xs) var(--tareas-radius-xs) var(--tareas-size-sm); }
-.tareas-group { border:1px solid var(--background-modifier-border); border-radius:var(--tareas-radius-md); padding:var(--tareas-size-xs) var(--tareas-size-xs) var(--tareas-size-sm); background:var(--background-primary-alt, var(--background-secondary)); min-height:120px; display:flex; flex-direction:column; }
+.tareas-group { border:1px solid var(--background-modifier-border); border-radius:var(--tareas-radius-md); padding:var(--tareas-size-xs) var(--tareas-size-xs) var(--tareas-size-sm); background:var(--background-primary-alt, var(--background-secondary)); min-height:120px; display:flex; flex-direction:column; transition:box-shadow 0.24s cubic-bezier(0.2, 0.82, 0.2, 1), opacity 0.2s ease; }
 .tareas-group-header { display:flex; align-items:center; gap:6px; padding:6px 4px; cursor:pointer; user-select:none; border-radius:var(--tareas-radius-sm); position:relative; }
 .tareas-group-header:hover { background:var(--background-secondary); }
 .tareas-toggle { font-size:11px; opacity:0.5; width:16px; flex-shrink:0; }
 .tareas-count { font-size:13px; opacity:0.45; }
 
-.tareas-group-drag-handle { cursor:grab; opacity:0.15; font-size:12px; user-select:none; flex-shrink:0; }
+.tareas-group-drag-handle { cursor:grab; opacity:0.2; font-size:12px; user-select:none; flex-shrink:0; padding:2px 4px; border-radius:var(--tareas-radius-xs); transition:opacity 0.18s ease, background 0.18s ease; }
 .tareas-group-header:hover .tareas-group-drag-handle { opacity:0.45; }
-.tareas-group-drag-handle:hover { opacity:0.9 !important; }
+.tareas-group-drag-handle:hover { opacity:0.9 !important; background:var(--background-modifier-hover); }
 .tareas-group-drag-handle:active { cursor:grabbing; }
-.tareas-group-dragging { opacity:0.35; }
-.tareas-group-drag-over > .tareas-group-header { border-top:2px solid var(--interactive-accent) !important; border-radius:0; }
+.tareas-group-dragging { opacity:0.5; box-shadow:0 10px 24px color-mix(in srgb, var(--interactive-accent) 18%, transparent); }
+.tareas-group-drag-over-before { box-shadow:inset 3px 0 0 var(--interactive-accent); }
+.tareas-group-drag-over-after { box-shadow:inset -3px 0 0 var(--interactive-accent); }
 
 .tareas-group-edit-btn { opacity:0; cursor:pointer; font-size:13px; padding:1px 7px; border-radius:var(--tareas-radius-sm); margin-left:auto; flex-shrink:0; background:transparent; border:none; color:var(--text-muted); }
 .tareas-group-header:hover .tareas-group-edit-btn { opacity:0.55; }

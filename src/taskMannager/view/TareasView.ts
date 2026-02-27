@@ -60,6 +60,8 @@ export class TareasView extends obsidian.ItemView {
   private dragDepth: number | null = null
   private dragParent: string | null = null
   private dragInsertPosition: 'before' | 'after' | null = null
+  private dragGroupName: string | null = null
+  private dragGroupColumn: HTMLElement | null = null
   private droppedTaskAnimationPath: string | null = null
   private lastRenderedTab: string | null = null
   private activeTab: string
@@ -1030,7 +1032,16 @@ export class TareasView extends obsidian.ItemView {
     const expanded = this.expandedGroups.has(expansionKey)
 
     const column = root.createDiv({ cls: 'tareas-group' })
+    column.dataset.group = groupName
     const header = column.createDiv({ cls: 'tareas-group-header' })
+    let dragHandle: HTMLElement | null = null
+
+    if (isManaged) {
+      dragHandle = header.createEl('span', { text: '☰', cls: 'tareas-group-drag-handle' })
+      dragHandle.setAttr('aria-label', `Mover grupo ${groupName}`)
+      dragHandle.setAttr('title', 'Arrastrar para mover grupo')
+      dragHandle.draggable = true
+    }
 
     header.createEl('span', { text: expanded ? '▼ ' : '▶ ', cls: 'tareas-toggle' })
     const badge = header.createEl('span', { text: groupName, cls: 'tareas-badge' })
@@ -1044,6 +1055,8 @@ export class TareasView extends obsidian.ItemView {
         new EditSectionModal(this.app, this.plugin, group, this, this.activeTab).open()
       }
     }
+
+    this.attachGroupDragHandlers(root, column, dragHandle, groupName, isManaged)
 
     header.onclick = () => {
       if (expanded)
@@ -2049,6 +2062,90 @@ export class TareasView extends obsidian.ItemView {
     })
   }
 
+  private attachGroupDragHandlers(
+    board: HTMLElement,
+    column: HTMLElement,
+    handle: HTMLElement | null,
+    groupName: string,
+    isManaged: boolean,
+  ) {
+    if (!isManaged || !handle)
+      return
+
+    handle.addEventListener('mousedown', event => event.stopPropagation())
+    handle.addEventListener('click', event => event.stopPropagation())
+
+    handle.addEventListener('dragstart', (event) => {
+      const dataTransfer = event.dataTransfer
+      if (!dataTransfer)
+        return
+
+      this.dragGroupName = groupName
+      this.dragGroupColumn = column
+      column.addClass('tareas-group-dragging')
+      dataTransfer.effectAllowed = 'move'
+      dataTransfer.setData('text/plain', groupName)
+      event.stopPropagation()
+    })
+
+    handle.addEventListener('dragend', () => {
+      this.resetGroupDragState(board)
+    })
+
+    column.addEventListener('dragover', (event) => {
+      const draggedGroupColumn = this.dragGroupColumn
+      if (!this.dragGroupName || !draggedGroupColumn || this.dragGroupName === groupName || draggedGroupColumn === column)
+        return
+
+      event.preventDefault()
+      event.stopPropagation()
+      if (event.dataTransfer)
+        event.dataTransfer.dropEffect = 'move'
+
+      const insertPosition = this.resolveGroupInsertPosition(event, column)
+      this.clearGroupDropMarkers(board)
+      column.addClass(insertPosition === 'before' ? 'tareas-group-drag-over-before' : 'tareas-group-drag-over-after')
+
+      const referenceNode = insertPosition === 'before' ? column : column.nextElementSibling
+      if (referenceNode === draggedGroupColumn)
+        return
+
+      if (insertPosition === 'after' && column.nextElementSibling === draggedGroupColumn)
+        return
+
+      this.animateGroupReflow(board, () => {
+        board.insertBefore(draggedGroupColumn, referenceNode)
+      })
+    })
+
+    column.addEventListener('dragleave', (event) => {
+      if (event.relatedTarget instanceof Node && column.contains(event.relatedTarget))
+        return
+
+      column.removeClass('tareas-group-drag-over-before')
+      column.removeClass('tareas-group-drag-over-after')
+    })
+
+    column.addEventListener('drop', async (event) => {
+      const draggedGroupName = this.dragGroupName
+      if (!draggedGroupName || draggedGroupName === groupName)
+        return
+
+      event.preventDefault()
+      event.stopPropagation()
+
+      const managedGroupNames = new Set(this.plugin.getEquiposForTablero(this.activeTab).map(item => item.name))
+      const orderedGroupNames = Array.from(board.querySelectorAll<HTMLElement>(':scope > .tareas-group'))
+        .map(item => item.dataset.group ?? '')
+        .filter(name => managedGroupNames.has(name))
+
+      const reordered = await this.plugin.setEquiposOrderForTablero(this.activeTab, orderedGroupNames)
+      this.resetGroupDragState(board)
+      if (reordered)
+        await this.render()
+    })
+  }
+
   private async reorderTask(draggedPath: string, targetPath: string, allTasks: TaskItem[], insertPosition: 'before' | 'after' | null = null) {
     const dragged = allTasks.find(task => task.file.path === draggedPath)
     const target = allTasks.find(task => task.file.path === targetPath)
@@ -2148,6 +2245,44 @@ export class TareasView extends obsidian.ItemView {
     root.querySelectorAll('.tareas-task-card-drag-over').forEach(item => item.classList.remove('tareas-task-card-drag-over'))
     root.querySelectorAll('.tareas-task-card-drag-over-top').forEach(item => item.classList.remove('tareas-task-card-drag-over-top'))
     root.querySelectorAll('.tareas-task-card-drag-over-bottom').forEach(item => item.classList.remove('tareas-task-card-drag-over-bottom'))
+  }
+
+  private resolveGroupInsertPosition(event: DragEvent, column: HTMLElement): 'before' | 'after' {
+    const bounds = column.getBoundingClientRect()
+    const midpoint = bounds.left + (bounds.width / 2)
+    return event.clientX < midpoint ? 'before' : 'after'
+  }
+
+  private animateGroupReflow(board: HTMLElement, mutateDom: () => void) {
+    const items = Array.from(board.querySelectorAll<HTMLElement>(':scope > .tareas-group'))
+    const previousBoxes = new Map(items.map(item => [item, item.getBoundingClientRect()]))
+    mutateDom()
+
+    const nextItems = Array.from(board.querySelectorAll<HTMLElement>(':scope > .tareas-group'))
+    for (const item of nextItems) {
+      const previousBox = previousBoxes.get(item)
+      if (!previousBox)
+        continue
+
+      const nextBox = item.getBoundingClientRect()
+      const offsetX = previousBox.left - nextBox.left
+      const offsetY = previousBox.top - nextBox.top
+      if (Math.abs(offsetX) < 1 && Math.abs(offsetY) < 1)
+        continue
+
+      item.animate(
+        [
+          { transform: `translate(${offsetX}px, ${offsetY}px)` },
+          { transform: 'translate(0, 0)' },
+        ],
+        { duration: 240, easing: 'cubic-bezier(0.2, 0.82, 0.2, 1)', fill: 'both' },
+      )
+    }
+  }
+
+  private clearGroupDropMarkers(board: HTMLElement) {
+    board.querySelectorAll('.tareas-group-drag-over-before').forEach(item => item.classList.remove('tareas-group-drag-over-before'))
+    board.querySelectorAll('.tareas-group-drag-over-after').forEach(item => item.classList.remove('tareas-group-drag-over-after'))
   }
 
   private resolveNextOrderForGroup(allTasks: TaskItem[], boardName: string, groupName: string, excludePath: string): number {
@@ -2266,6 +2401,13 @@ export class TareasView extends obsidian.ItemView {
     card.removeClass('tareas-task-card-drag-preview')
     this.clearCardDropMarkers()
     this.getRootEl().querySelectorAll('.tareas-card-list-drop-target').forEach(item => item.classList.remove('tareas-card-list-drop-target'))
+  }
+
+  private resetGroupDragState(board: HTMLElement) {
+    this.dragGroupName = null
+    this.dragGroupColumn = null
+    board.querySelectorAll('.tareas-group-dragging').forEach(item => item.classList.remove('tareas-group-dragging'))
+    this.clearGroupDropMarkers(board)
   }
 
   private getRootEl(): HTMLElement {
