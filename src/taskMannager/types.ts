@@ -78,6 +78,7 @@ export interface PomodoroState {
 
 export interface TareasViewHandle {
   expandedGroups: Set<string>
+  setActiveTab: (tabId: string) => void
   render: () => Promise<void> | void
 }
 

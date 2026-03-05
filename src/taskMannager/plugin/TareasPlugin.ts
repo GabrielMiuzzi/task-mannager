@@ -21,6 +21,7 @@ import { rebuildTaskChildLinks, syncTaskTypeTags } from '../engines/frontmatterE
 import { getTasks } from '../engines/taskEngine'
 import {
   ensureBoardTaskIndexFile,
+  getBoardTaskIndexBasename,
   removeTaskLinkFromCancelledIndex,
   removeTaskLinkFromFinishedIndex,
   removeTaskLinkFromIndex,
@@ -128,6 +129,56 @@ export class TareasPlugin extends obsidian.Plugin {
     this.tableros.push({ name: normalizedName, color })
     void this.ensureBoardWorkspace(normalizedName)
     void this.saveSettings()
+  }
+
+  async editTablero(
+    currentBoardName: string,
+    updates: { name: string, color: string },
+  ): Promise<{ ok: boolean, boardName: string, error?: string }> {
+    const currentName = currentBoardName.trim().toLowerCase()
+    const nextName = updates.name.trim().toLowerCase()
+    if (!currentName || !nextName)
+      return { ok: false, boardName: currentName || nextName, error: 'invalid-name' }
+
+    const boardIndex = this.tableros.findIndex(tablero => tablero.name === currentName)
+    if (boardIndex < 0)
+      return { ok: false, boardName: currentName, error: 'board-not-found' }
+
+    if (currentName === DEFAULT_BOARD_NAME)
+      return { ok: false, boardName: currentName, error: 'default-board-locked' }
+
+    if (nextName !== currentName && this.tableros.some(tablero => tablero.name === nextName))
+      return { ok: false, boardName: currentName, error: 'board-already-exists' }
+
+    if (nextName !== currentName) {
+      const renamed = await this.renameBoardFolder(currentName, nextName)
+      if (!renamed)
+        return { ok: false, boardName: currentName, error: 'board-folder-conflict' }
+
+      await this.renameBoardTaskIndexFile(currentName, nextName)
+      await this.renameBoardInTaskFrontmatter(currentName, nextName)
+
+      this.equipos = this.equipos.map((equipo) => {
+        if ((equipo.tablero || DEFAULT_BOARD_NAME) !== currentName)
+          return equipo
+
+        return { ...equipo, tablero: nextName }
+      })
+
+      this.pomodoro = this.remapPomodoroTaskPath(currentName, nextName)
+    }
+
+    this.tableros[boardIndex] = {
+      ...this.tableros[boardIndex],
+      name: nextName,
+      color: updates.color,
+    }
+
+    await this.ensureBoardWorkspace(nextName)
+    await syncAllTaskIndexes(this.app)
+    await this.saveSettings()
+
+    return { ok: true, boardName: nextName }
   }
 
   canRemoveTablero(boardName: string): boolean {
@@ -334,6 +385,72 @@ export class TareasPlugin extends obsidian.Plugin {
     const boardSubtasksPath = `${boardRootPath}/subTasks`
     await this.deleteFolderIfExists(boardSubtasksPath)
     await this.deleteFolderIfExists(boardRootPath)
+  }
+
+  private async renameBoardFolder(currentBoardName: string, nextBoardName: string): Promise<boolean> {
+    const currentFolderPath = `${TAREAS_FOLDER}/${currentBoardName}`
+    const nextFolderPath = `${TAREAS_FOLDER}/${nextBoardName}`
+    const currentFolder = this.app.vault.getAbstractFileByPath(currentFolderPath)
+    const nextFolder = this.app.vault.getAbstractFileByPath(nextFolderPath)
+    if (nextFolder)
+      return false
+
+    if (!(currentFolder instanceof obsidian.TFolder))
+      return true
+
+    await this.app.fileManager.renameFile(currentFolder, nextFolderPath)
+    return true
+  }
+
+  private async renameBoardTaskIndexFile(currentBoardName: string, nextBoardName: string): Promise<void> {
+    const currentIndexBasename = getBoardTaskIndexBasename(currentBoardName)
+    const nextIndexBasename = getBoardTaskIndexBasename(nextBoardName)
+    const currentIndexPath = `${TAREAS_FOLDER}/${nextBoardName}/${currentIndexBasename}.md`
+    const nextIndexPath = `${TAREAS_FOLDER}/${nextBoardName}/${nextIndexBasename}.md`
+
+    const currentIndexFile = this.app.vault.getAbstractFileByPath(currentIndexPath)
+    const nextIndexFile = this.app.vault.getAbstractFileByPath(nextIndexPath)
+
+    if (nextIndexFile instanceof obsidian.TFile) {
+      if (currentIndexFile instanceof obsidian.TFile)
+        await this.app.vault.delete(currentIndexFile, true)
+      return
+    }
+
+    if (currentIndexFile instanceof obsidian.TFile)
+      await this.app.fileManager.renameFile(currentIndexFile, nextIndexPath)
+  }
+
+  private async renameBoardInTaskFrontmatter(currentBoardName: string, nextBoardName: string): Promise<void> {
+    const files = this.app.vault
+      .getMarkdownFiles()
+      .filter(file => file.path.startsWith(`${TAREAS_FOLDER}/${nextBoardName}/`))
+
+    for (const file of files) {
+      await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        const boardInFrontmatter = typeof frontmatter.tablero === 'string'
+          ? frontmatter.tablero.trim().toLowerCase()
+          : ''
+
+        if (boardInFrontmatter === currentBoardName)
+          frontmatter.tablero = nextBoardName
+      })
+    }
+  }
+
+  private remapPomodoroTaskPath(currentBoardName: string, nextBoardName: string): PomodoroState {
+    const selectedTaskPath = this.pomodoro.selectedTaskPath
+    const currentPrefix = `${TAREAS_FOLDER}/${currentBoardName}/`
+    const nextPrefix = `${TAREAS_FOLDER}/${nextBoardName}/`
+    const nextSelectedTaskPath = selectedTaskPath?.startsWith(currentPrefix)
+      ? `${nextPrefix}${selectedTaskPath.slice(currentPrefix.length)}`
+      : selectedTaskPath
+
+    return {
+      ...this.pomodoro,
+      durations: { ...this.pomodoro.durations },
+      selectedTaskPath: nextSelectedTaskPath ?? null,
+    }
   }
 
   private async deleteFolderIfExists(path: string) {

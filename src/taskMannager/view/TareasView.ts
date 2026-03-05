@@ -1,6 +1,14 @@
 import * as obsidian from 'obsidian'
 
-import { DEFAULT_BOARD_NAME, ESTADOS, ORDER_STEP, POMODORO_LOG_BASENAME, PRIORIDADES, VIEW_TYPE } from '../constants'
+import {
+  DEFAULT_BOARD_NAME,
+  ESTADOS,
+  ORDER_STEP,
+  POMODORO_LOG_BASENAME,
+  POMODORO_WORK_CYCLES_BEFORE_LONG_BREAK,
+  PRIORIDADES,
+  VIEW_TYPE,
+} from '../constants'
 import { moveTaskToActiveFolder, moveTaskToCancelledFolder, moveTaskToCompletedFolder } from '../engines/completionEngine'
 import { updateFrontmatter } from '../engines/frontmatterEngine'
 import { persistTaskOrder, reorderList } from '../engines/orderEngine'
@@ -20,7 +28,13 @@ import {
   resumePomodoro,
   startPomodoro,
 } from '../engines/pomodoroEngine'
-import { appendPomodoroLogEntry, getEntriesByDate, readPomodoroLogEntries, toLocalDateText } from '../engines/pomodoroLogEngine'
+import {
+  appendPomodoroLogEntry,
+  deletePomodoroLogEntry,
+  getEntriesByDate,
+  readPomodoroLogEntries,
+  toLocalDateText,
+} from '../engines/pomodoroLogEngine'
 import { rebalanceGroupEndDates } from '../engines/scheduleEngine'
 import {
   extractTaskBodyPreview,
@@ -32,6 +46,7 @@ import {
   parseTaskDate,
 } from '../engines/taskEngine'
 import { EditSectionModal } from '../modals/EditSectionModal'
+import { EditBoardModal } from '../modals/EditBoardModal'
 import { NewBoardModal } from '../modals/NewBoardModal'
 import { NewGroupModal } from '../modals/NewGroupModal'
 import { NewTaskModal } from '../modals/NewTaskModal'
@@ -49,6 +64,23 @@ export class TareasView extends obsidian.ItemView {
   private static readonly COMPLETED_TAB_ID = '__completed__'
   private static readonly CANCELLED_TAB_ID = '__cancelled__'
   private static readonly POMODORO_TAB_ID = '__pomodoro__'
+  private static readonly POMODORO_BREAK_MESSAGES = [
+    'Respirá un toque, venís bien.',
+    'Soltá los hombros un segundo.',
+    'Hidratate, campeón.',
+    'Micro descanso para volver más fuerte.',
+    'Buen ritmo!.',
+    'Estirá el cuello dos segundos.',
+    'Aprovechá este mini reset mental.',
+    'Pará un segundo: tu cerebro lo agradece.',
+    'Pasito atrás y volvés con foco.',
+    'Mirada lejos de la pantalla.',
+    'Aflojá la mandíbula.',
+    'Respirá profundo, crack.',
+    'Sacate tensión del cuello.',
+    'Desenchufá 20 segundos.',
+    'Te estás volviendo una máquina de constancia.',
+  ]
 
   private plugin: TareasPlugin
   expandedGroups: Set<string>
@@ -71,6 +103,11 @@ export class TareasView extends obsidian.ItemView {
   private pomodoroPhaseEl: HTMLElement | null = null
   private pomodoroCycleEl: HTMLElement | null = null
   private pomodoroStateEl: HTMLElement | null = null
+  private pomodoroBreakMessageEl: HTMLElement | null = null
+  private pomodoroRunGlyphEl: HTMLElement | null = null
+  private pomodoroLastVisualState: { phase: PomodoroPhase, runState: PomodoroState['runState'], isDeviationActive: boolean } | null = null
+  private pomodoroLastBreathSoundSecond: number | null = null
+  private pomodoroLastBreathSoundKey: string | null = null
   private pomodoroAudioContext: AudioContext | null = null
 
   constructor(leaf: obsidian.WorkspaceLeaf, plugin: TareasPlugin) {
@@ -243,12 +280,14 @@ export class TareasView extends obsidian.ItemView {
 
     const top = panel.createDiv({ cls: 'tareas-pomodoro-top' })
     this.pomodoroPhaseEl = top.createEl('h2', { cls: 'tareas-pomodoro-phase' })
-    this.pomodoroCycleEl = top.createEl('span', { cls: 'tareas-pomodoro-cycles' })
+    this.pomodoroCycleEl = top.createEl('span', { cls: 'tareas-pomodoro-cycles-badge' })
 
     const timerWrap = panel.createDiv({ cls: 'tareas-pomodoro-timer-wrap' })
     this.pomodoroProgressEl = timerWrap.createDiv({ cls: 'tareas-pomodoro-progress' })
     const timerInner = this.pomodoroProgressEl.createDiv({ cls: 'tareas-pomodoro-progress-inner' })
     this.pomodoroTimeEl = timerInner.createEl('div', { cls: 'tareas-pomodoro-time' })
+    this.pomodoroRunGlyphEl = timerInner.createEl('div', { cls: 'tareas-pomodoro-run-glyph' })
+    this.pomodoroBreakMessageEl = panel.createEl('p', { cls: 'tareas-pomodoro-break-message' })
 
     const controls = panel.createDiv({ cls: 'tareas-pomodoro-controls' })
     this.renderPomodoroControls(controls, runtimeState)
@@ -417,14 +456,6 @@ export class TareasView extends obsidian.ItemView {
     deviationButton.disabled = !canToggleDeviation
     deviationButton.onclick = () => this.handlePomodoroDeviationToggle()
 
-    if (state.phase !== 'work') {
-      const extraControls = container.createDiv({ cls: 'tareas-pomodoro-controls-extra' })
-      const workButton = extraControls.createEl('button', {
-        text: 'Ir a trabajo',
-        cls: 'tareas-pomodoro-btn',
-      })
-      workButton.onclick = () => this.handlePomodoroSwitchToWork()
-    }
   }
 
   private handlePomodoroStart() {
@@ -472,7 +503,7 @@ export class TareasView extends obsidian.ItemView {
         const nextPhaseLabel = getPomodoroPhaseLabel(result.state.phase)
         new obsidian.Notice(`Desvío finalizado. Iniciando ${nextPhaseLabel.toLowerCase()}.`, 7000)
         this.flashPomodoroPanel()
-        this.playPomodoroBeep()
+        this.playPomodoroAlarmShort()
         await this.addPomodoroWorkTimeToSelectedTask(['work'], result.state)
         await this.logPomodoroEntries(['work'], result.state, now)
       }
@@ -488,24 +519,6 @@ export class TareasView extends obsidian.ItemView {
     }
 
     this.plugin.setPomodoroState(next)
-    this.render()
-  }
-
-  private handlePomodoroSwitchToWork() {
-    this.unlockPomodoroAudio()
-    const current = this.getPomodoroRuntimeState(false)
-    const workState = {
-      ...current,
-      phase: 'work' as PomodoroPhase,
-      runState: 'idle' as const,
-      remainingSeconds: current.durations.workMinutes * 60,
-      endTimestamp: null,
-      isDeviationActive: false,
-      deviationStartedAt: null,
-      deviationBaseRemainingSeconds: 0,
-      phaseDeviationSeconds: 0,
-    }
-    this.plugin.setPomodoroState(workState)
     this.render()
   }
 
@@ -553,12 +566,17 @@ export class TareasView extends obsidian.ItemView {
   }
 
   private updatePomodoroDom(state: PomodoroState, nowMs: number) {
-    if (!this.pomodoroTimeEl || !this.pomodoroPhaseEl || !this.pomodoroCycleEl || !this.pomodoroStateEl)
+    if (!this.pomodoroTimeEl
+      || !this.pomodoroPhaseEl
+      || !this.pomodoroCycleEl
+      || !this.pomodoroStateEl
+      || !this.pomodoroRunGlyphEl)
       return
 
     const remaining = getPomodoroRemainingSeconds(state, nowMs)
     const deviationElapsed = getDeviationElapsedSeconds(state, nowMs)
     const displayedSeconds = state.isDeviationActive ? deviationElapsed : remaining
+    this.handlePomodoroCountdownBreathAudio(state, remaining)
     this.pomodoroTimeEl.setText(formatPomodoroCountdown(displayedSeconds))
     this.pomodoroTimeEl.toggleClass('is-deviation', state.isDeviationActive)
     if (this.pomodoroProgressEl) {
@@ -570,20 +588,188 @@ export class TareasView extends obsidian.ItemView {
         : Math.max(0, totalSeconds - remaining)
       const progressPercent = Math.min(100, (elapsed / totalSeconds) * 100)
       this.pomodoroProgressEl.style.setProperty('--tareas-pomodoro-progress', `${progressPercent}%`)
-      this.pomodoroProgressEl.setAttr('data-mode', state.isDeviationActive ? 'deviation' : 'normal')
+      this.pomodoroProgressEl.setAttr('data-mode', this.resolvePomodoroVisualMode(state))
+      this.pomodoroProgressEl.setAttr('data-run-state', state.runState)
+      this.pomodoroProgressEl.setAttr('data-pulse', String(this.shouldPulsePomodoroRing(state, remaining)))
+
+      const glowState = this.resolvePomodoroGlowState(state)
+      this.pomodoroProgressEl.setAttr('data-glow', glowState)
     }
     this.pomodoroPhaseEl.setText(getPomodoroPhaseLabel(state.phase))
-    this.pomodoroCycleEl.setText(`Ciclos completados: ${state.completedWorkCycles}`)
+    const completedInCycle = state.completedWorkCycles % POMODORO_WORK_CYCLES_BEFORE_LONG_BREAK
+    const cycleValue = completedInCycle === 0 && state.completedWorkCycles > 0
+      ? POMODORO_WORK_CYCLES_BEFORE_LONG_BREAK
+      : completedInCycle
+    this.pomodoroCycleEl.setText(`${cycleValue} / ${POMODORO_WORK_CYCLES_BEFORE_LONG_BREAK}`)
 
-    const runStateLabel = state.isDeviationActive
-      ? 'Desvío'
-      : state.runState === 'running'
-        ? 'En curso'
-        : state.runState === 'paused'
-          ? 'Pausado'
-          : 'Listo'
+    const runStateLabel = this.resolvePomodoroRunStateLabel(state)
     this.pomodoroStateEl.setText(runStateLabel)
     this.pomodoroStateEl.setAttr('data-state', state.isDeviationActive ? 'deviation' : state.runState)
+
+    const runGlyph = state.runState === 'running'
+      ? ''
+      : state.runState === 'paused'
+        ? '⏸'
+        : '◼'
+    this.pomodoroRunGlyphEl.setText(runGlyph)
+    this.pomodoroRunGlyphEl.toggleClass('is-visible', Boolean(runGlyph))
+
+    if (this.pomodoroBreakMessageEl) {
+      const breakMessage = this.resolvePomodoroBreakMessage(state)
+      this.pomodoroBreakMessageEl.setText(breakMessage)
+      this.pomodoroBreakMessageEl.toggleClass('is-visible', Boolean(breakMessage))
+    }
+
+    this.applyPomodoroTransitionEffects(state)
+    this.pomodoroLastVisualState = {
+      phase: state.phase,
+      runState: state.runState,
+      isDeviationActive: state.isDeviationActive,
+    }
+  }
+
+  private shouldPulsePomodoroRing(state: PomodoroState, remainingSeconds: number): boolean {
+    if (state.runState !== 'running' || state.isDeviationActive)
+      return false
+
+    return remainingSeconds > 0 && remainingSeconds <= 10
+  }
+
+  private handlePomodoroCountdownBreathAudio(state: PomodoroState, remainingSeconds: number) {
+    const phaseKey = `${state.phase}:${state.runState}:${state.isDeviationActive ? 'deviation' : 'normal'}`
+    if (this.pomodoroLastBreathSoundKey !== phaseKey) {
+      this.pomodoroLastBreathSoundKey = phaseKey
+      this.pomodoroLastBreathSoundSecond = null
+    }
+
+    const shouldPlayBreath = state.runState === 'running'
+      && !state.isDeviationActive
+      && remainingSeconds > 0
+      && remainingSeconds <= 4
+    if (!shouldPlayBreath)
+      return
+
+    if (this.pomodoroLastBreathSoundSecond === remainingSeconds)
+      return
+
+    this.pomodoroLastBreathSoundSecond = remainingSeconds
+    this.playPomodoroBreathTick()
+  }
+
+  private resolvePomodoroVisualMode(state: PomodoroState):
+    'prepared'
+    | 'work'
+    | 'short-break'
+    | 'long-break'
+    | 'paused-work'
+    | 'paused-short-break'
+    | 'paused-long-break'
+    | 'deviation' {
+    if (state.isDeviationActive)
+      return 'deviation'
+
+    if (state.runState === 'idle')
+      return 'prepared'
+
+    if (state.runState === 'paused') {
+      if (state.phase === 'short-break')
+        return 'paused-short-break'
+      if (state.phase === 'long-break')
+        return 'paused-long-break'
+      return 'paused-work'
+    }
+
+    if (state.phase === 'short-break')
+      return 'short-break'
+    if (state.phase === 'long-break')
+      return 'long-break'
+    return 'work'
+  }
+
+  private resolvePomodoroGlowState(state: PomodoroState):
+    'prepared'
+    | 'work'
+    | 'short-break'
+    | 'long-break'
+    | 'paused'
+    | 'deviation' {
+    if (state.isDeviationActive)
+      return state.runState === 'running' ? 'deviation' : 'paused'
+
+    if (state.runState === 'idle')
+      return 'prepared'
+
+    if (state.runState === 'paused')
+      return 'paused'
+
+    if (state.phase === 'short-break')
+      return 'short-break'
+    if (state.phase === 'long-break')
+      return 'long-break'
+    return 'work'
+  }
+
+  private resolvePomodoroRunStateLabel(state: PomodoroState): string {
+    if (state.runState === 'idle')
+      return 'Preparado'
+
+    if (state.runState === 'paused')
+      return 'Pausado...'
+
+    if (state.isDeviationActive)
+      return 'Desvío activo...'
+
+    if (state.phase === 'work')
+      return 'Trabajando...'
+
+    if (state.phase === 'short-break')
+      return 'Descanso corto...'
+
+    if (state.phase === 'long-break')
+      return 'Descanso largo...'
+
+    return 'Listo'
+  }
+
+  private resolvePomodoroBreakMessage(state: PomodoroState): string {
+    const isBreak = state.phase === 'short-break' || state.phase === 'long-break'
+    if (!isBreak)
+      return ''
+
+    const messageIndexSeed = state.completedWorkCycles + (state.phase === 'long-break' ? 7 : 3)
+    const messageIndex = messageIndexSeed % TareasView.POMODORO_BREAK_MESSAGES.length
+    return TareasView.POMODORO_BREAK_MESSAGES[messageIndex] || ''
+  }
+
+  private applyPomodoroTransitionEffects(state: PomodoroState) {
+    const previous = this.pomodoroLastVisualState
+    if (!previous)
+      return
+
+    const phaseChanged = previous.phase !== state.phase || previous.isDeviationActive !== state.isDeviationActive
+    const runStateChanged = previous.runState !== state.runState
+
+    if (phaseChanged)
+      this.triggerPomodoroVisualPulse('is-phase-shift')
+
+    if (runStateChanged)
+      this.triggerPomodoroVisualPulse('is-runstate-shift')
+
+    if (phaseChanged && this.pomodoroTimeEl)
+      this.triggerPomodoroVisualPulse('is-phase-shift-time', this.pomodoroTimeEl)
+  }
+
+  private triggerPomodoroVisualPulse(className: string, target?: HTMLElement) {
+    const node = target || this.pomodoroProgressEl
+    if (!node)
+      return
+
+    node.removeClass(className)
+    void node.offsetWidth
+    node.addClass(className)
+    window.setTimeout(() => {
+      node.removeClass(className)
+    }, 520)
   }
 
   private notifyPomodoroTransitions(completedPhases: PomodoroPhase[], nextState: PomodoroState) {
@@ -598,7 +784,7 @@ export class TareasView extends obsidian.ItemView {
       new obsidian.Notice(`Descanso finalizado. Iniciando ${nextPhaseLabel.toLowerCase()}.`, 7000)
 
     this.flashPomodoroPanel()
-    this.playPomodoroBeep()
+    this.playPomodoroAlarmShort()
     void this.addPomodoroWorkTimeToSelectedTask(completedPhases, nextState)
     void this.logPomodoroEntries(completedPhases, nextState, Date.now())
   }
@@ -712,7 +898,7 @@ export class TareasView extends obsidian.ItemView {
     const table = wrap.createEl('table', { cls: 'tareas-pomodoro-log-table' })
     const head = table.createEl('thead')
     const headRow = head.createEl('tr')
-    for (const title of ['Horario', 'Tipo de pomodoro', 'Duración elegida', 'Tarea', 'Tiempo', 'Desvio', 'Finalización'])
+    for (const title of ['Horario', 'Tipo de pomodoro', 'Duración elegida', 'Tarea', 'Tiempo', 'Desvio', 'Finalización', ''])
       headRow.createEl('th', { text: title })
 
     const body = table.createEl('tbody')
@@ -725,6 +911,15 @@ export class TareasView extends obsidian.ItemView {
       row.createEl('td', { text: this.formatPomodoroDurationMinutes(entry.durationMinutes) })
       row.createEl('td', { text: `${this.formatDecimal(entry.deviationHours)} h` })
       row.createEl('td', { text: entry.finalized ? 'true' : 'false' })
+
+      const actionsCell = row.createEl('td', { cls: 'tareas-pomodoro-log-actions' })
+      const deleteButton = actionsCell.createEl('button', {
+        cls: 'tareas-pomodoro-log-delete-btn',
+      })
+      obsidian.setIcon(deleteButton, 'trash-2')
+      deleteButton.setAttr('aria-label', 'Eliminar registro')
+      deleteButton.setAttr('title', 'Eliminar registro')
+      deleteButton.onclick = () => this.openDeletePomodoroLogEntryConfirm(entry.id)
     }
 
     this.renderPomodoroHourlyHeatmap(section, todayEntries)
@@ -761,6 +956,24 @@ export class TareasView extends obsidian.ItemView {
       })
       cell.setAttr('title', `${String(hour).padStart(2, '0')}:00 - ${count} pomodoro(s) de trabajo`)
     }
+  }
+
+  private openDeletePomodoroLogEntryConfirm(entryId: string) {
+    new ConfirmDeleteTaskModal(this.app, {
+      title: 'Eliminar registro Pomodoro',
+      message: '¿Seguro que querés eliminar este registro del día?',
+      confirmText: 'Aceptar',
+      onConfirm: async () => {
+        const removed = await deletePomodoroLogEntry(this.app, entryId)
+        if (!removed) {
+          new obsidian.Notice('No se pudo eliminar el registro.')
+          return
+        }
+
+        new obsidian.Notice('Registro eliminado.')
+        await this.render()
+      },
+    }).open()
   }
 
   private resolvePomodoroDurationChoice(durations: PomodoroDurations): string {
@@ -851,38 +1064,29 @@ export class TareasView extends obsidian.ItemView {
     }, 900)
   }
 
-  private playPomodoroBeep() {
+  private playPomodoroBreathTick() {
     const audioContext = this.ensurePomodoroAudioContext()
     if (!audioContext)
       return
 
-    const startBeep = () => {
+    const playTick = () => {
       try {
         const now = audioContext.currentTime
-        const first = audioContext.createOscillator()
-        const second = audioContext.createOscillator()
+        const oscillator = audioContext.createOscillator()
         const gain = audioContext.createGain()
 
-        first.type = 'sine'
-        second.type = 'sine'
-        first.frequency.value = 880
-        second.frequency.value = 988
+        oscillator.type = 'sine'
+        oscillator.frequency.value = 660
 
         gain.gain.setValueAtTime(0.0001, now)
-        gain.gain.exponentialRampToValueAtTime(0.09, now + 0.01)
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18)
-        gain.gain.setValueAtTime(0.0001, now + 0.20)
-        gain.gain.exponentialRampToValueAtTime(0.08, now + 0.22)
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.38)
+        gain.gain.exponentialRampToValueAtTime(0.045, now + 0.015)
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16)
 
-        first.connect(gain)
-        second.connect(gain)
+        oscillator.connect(gain)
         gain.connect(audioContext.destination)
 
-        first.start(now)
-        first.stop(now + 0.18)
-        second.start(now + 0.20)
-        second.stop(now + 0.38)
+        oscillator.start(now)
+        oscillator.stop(now + 0.16)
       }
       catch {
         // Ignore playback errors in environments that block autoplay.
@@ -891,14 +1095,56 @@ export class TareasView extends obsidian.ItemView {
 
     if (audioContext.state === 'suspended') {
       void audioContext.resume()
-        .then(startBeep)
+        .then(playTick)
         .catch(() => {
           // Ignore resume errors.
         })
       return
     }
 
-    startBeep()
+    playTick()
+  }
+
+  private playPomodoroAlarmShort() {
+    const audioContext = this.ensurePomodoroAudioContext()
+    if (!audioContext)
+      return
+
+    const playAlarm = () => {
+      try {
+        const now = audioContext.currentTime
+        const oscillator = audioContext.createOscillator()
+        const gain = audioContext.createGain()
+
+        oscillator.type = 'triangle'
+        oscillator.frequency.setValueAtTime(988, now)
+        oscillator.frequency.exponentialRampToValueAtTime(784, now + 0.24)
+
+        gain.gain.setValueAtTime(0.0001, now)
+        gain.gain.exponentialRampToValueAtTime(0.11, now + 0.015)
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.28)
+
+        oscillator.connect(gain)
+        gain.connect(audioContext.destination)
+
+        oscillator.start(now)
+        oscillator.stop(now + 0.30)
+      }
+      catch {
+        // Ignore playback errors in environments that block autoplay.
+      }
+    }
+
+    if (audioContext.state === 'suspended') {
+      void audioContext.resume()
+        .then(playAlarm)
+        .catch(() => {
+          // Ignore resume errors.
+        })
+      return
+    }
+
+    playAlarm()
   }
 
   private ensurePomodoroAudioContext(): AudioContext | null {
@@ -936,6 +1182,11 @@ export class TareasView extends obsidian.ItemView {
     this.pomodoroPhaseEl = null
     this.pomodoroCycleEl = null
     this.pomodoroStateEl = null
+    this.pomodoroBreakMessageEl = null
+    this.pomodoroRunGlyphEl = null
+    this.pomodoroLastVisualState = null
+    this.pomodoroLastBreathSoundSecond = null
+    this.pomodoroLastBreathSoundKey = null
   }
 
   private ensureValidActiveTab() {
@@ -959,6 +1210,10 @@ export class TareasView extends obsidian.ItemView {
     return `${this.activeTab}::${groupName}`
   }
 
+  setActiveTab(tabId: string) {
+    this.activeTab = tabId
+  }
+
   private isArchivedTab(): boolean {
     return this.activeTab === TareasView.COMPLETED_TAB_ID || this.activeTab === TareasView.CANCELLED_TAB_ID
   }
@@ -970,16 +1225,22 @@ export class TareasView extends obsidian.ItemView {
   private renderHeader(root: HTMLElement) {
     const header = root.createDiv({ cls: 'tareas-header' })
 
-    const titleWrap = header.createDiv({ cls: 'tareas-title-wrap' })
-    titleWrap.createEl('span', { text: '☰', cls: 'tareas-icon' })
-    titleWrap.createEl('h1', { text: ' Tareas' })
-
     const actions = header.createDiv({ cls: 'tareas-header-actions' })
-    actions.createEl('span', { text: '▦ Tablero', cls: 'tareas-view-toggle' })
-
     const newButton = actions.createEl('button', { cls: 'tareas-btn-new' })
     newButton.createEl('span', { text: 'Nuevo tablero' })
     newButton.onclick = () => new NewBoardModal(this.app, this.plugin, this).open()
+
+    const editButton = actions.createEl('button', { cls: 'tareas-btn-edit-board' })
+    editButton.createEl('span', { text: 'Editar tablero' })
+    const currentBoard = this.plugin.tableros.find(board => board.name === this.activeTab)
+    const canEditBoard = Boolean(currentBoard) && this.activeTab !== DEFAULT_BOARD_NAME
+    editButton.disabled = !canEditBoard
+    editButton.onclick = () => {
+      if (!canEditBoard || !currentBoard)
+        return
+
+      new EditBoardModal(this.app, this.plugin, this, currentBoard).open()
+    }
 
     const deleteButton = actions.createEl('button', { cls: 'tareas-btn-delete-board' })
     deleteButton.createEl('span', { text: 'Eliminar tablero' })

@@ -3,6 +3,7 @@ import { TFile, TFolder, type App } from 'obsidian'
 import { POMODORO_LOG_BASENAME, TAREAS_FOLDER } from '../constants'
 
 export interface PomodoroLogEntry {
+  id: string
   date: string
   time: string
   type: string
@@ -67,7 +68,8 @@ export async function readPomodoroLogEntries(app: App): Promise<PomodoroLogEntry
   const entries: PomodoroLogEntry[] = []
 
   const lines = content.split(/\r?\n/)
-  for (const line of lines) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    const line = lines[lineIndex]
     if (!line.trim().startsWith('|'))
       continue
 
@@ -90,6 +92,7 @@ export async function readPomodoroLogEntries(app: App): Promise<PomodoroLogEntry
     const finalizedValue = hasFinalizedColumn ? columns[7] : 'true'
 
     entries.push({
+      id: String(lineIndex),
       date: columns[0],
       time: columns[1],
       type: columns[2],
@@ -102,6 +105,32 @@ export async function readPomodoroLogEntries(app: App): Promise<PomodoroLogEntry
   }
 
   return entries
+}
+
+export async function deletePomodoroLogEntry(app: App, entryId: string): Promise<boolean> {
+  await ensurePomodoroLogFile(app)
+
+  const file = app.vault.getAbstractFileByPath(POMODORO_LOG_PATH)
+  if (!(file instanceof TFile))
+    return false
+
+  const content = await app.vault.cachedRead(file)
+  const lines = content.split(/\r?\n/)
+  const targetIndex = Number.parseInt(entryId, 10)
+  if (Number.isNaN(targetIndex) || targetIndex < 0 || targetIndex >= lines.length)
+    return false
+
+  const targetLine = lines[targetIndex] || ''
+  if (!targetLine.trim().startsWith('|'))
+    return false
+
+  if (targetLine.includes('fecha | horario | tipo de pomodoro') || targetLine.includes('| --- |'))
+    return false
+
+  lines.splice(targetIndex, 1)
+  const nextContent = `${lines.join('\n').trimEnd()}\n`
+  await app.vault.modify(file, nextContent)
+  return true
 }
 
 export function getEntriesByDate(entries: PomodoroLogEntry[], localDateText: string): PomodoroLogEntry[] {
