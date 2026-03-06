@@ -727,20 +727,38 @@ body.obsia-hide-graph-ribbon .workspace-ribbon .clickable-icon.obsia-hidden-grap
 .obsia-building-title {
   position: absolute;
   left: var(--obsia-title-x, 90px);
-  top: calc(var(--obsia-svg-offset-y, -18px) + var(--obsia-title-y, 24px));
-  width: calc(var(--obsia-floor-w, 180px) * 0.72);
+  top: var(--obsia-title-top, -52px);
+  width: calc(var(--obsia-floor-w, 180px) * 0.86);
   transform: translate(-50%, -50%) rotate(-30deg);
   transform-origin: center;
   margin-bottom: 0;
-  font-size: 18px;
-  color: color-mix(in srgb, var(--text-normal) 92%, white 8%);
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--text-accent) 58%, var(--background-modifier-border));
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--background-primary) 90%, white 8%),
+      color-mix(in srgb, var(--background-primary) 86%, black 8%)
+    );
+  box-shadow:
+    0 8px 18px color-mix(in srgb, black 38%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--text-accent) 22%, transparent),
+    inset 0 1px 0 color-mix(in srgb, white 18%, transparent);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0.03em;
+  color: color-mix(in srgb, var(--text-normal) 94%, white 10%);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   text-align: center;
   user-select: none;
-  text-shadow: 0 1px 0 color-mix(in srgb, black 42%, transparent);
-  z-index: 7;
+  text-shadow:
+    0 1px 0 color-mix(in srgb, black 52%, transparent),
+    0 0 8px color-mix(in srgb, var(--text-accent) 18%, transparent);
+  z-index: 9;
   pointer-events: none;
 }
 
@@ -762,6 +780,30 @@ body.obsia-hide-graph-ribbon .workspace-ribbon .clickable-icon.obsia-hidden-grap
   gap: 0;
 }
 
+.obsia-building-stacks {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.obsia-building-rows {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+
+.obsia-building-base-stack {
+  z-index: 3;
+}
+
+.obsia-building-row-stack {
+  position: absolute;
+  pointer-events: auto;
+}
+
 .obsia-floor {
   position: relative;
   width: var(--obsia-floor-w, 180px);
@@ -779,14 +821,24 @@ body.obsia-hide-graph-ribbon .workspace-ribbon .clickable-icon.obsia-hidden-grap
   transform: translateY(var(--obsia-svg-offset-y, -18px));
   overflow: visible;
   filter: drop-shadow(0 6px 10px color-mix(in srgb, black 32%, transparent));
+  pointer-events: none;
 }
 
-.obsia-floor:hover {
-  transform: translateY(-2px);
+.obsia-floor-svg .obsia-floor-face,
+.obsia-floor-svg .obsia-floor-label {
+  pointer-events: visiblePainted;
 }
 
-.obsia-floor:hover .obsia-floor-svg {
+.obsia-floor:not(.is-command).is-file-hover .obsia-floor-svg {
   filter: drop-shadow(0 8px 14px color-mix(in srgb, black 42%, transparent));
+}
+
+.obsia-floor:not(.is-command).is-file-hover .obsia-floor-face {
+  stroke: #22c55e !important;
+}
+
+.obsia-floor:not(.is-command).is-file-hover .obsia-floor-label {
+  fill: #86efac;
 }
 
 .obsia-floor.is-command-handle {
@@ -802,6 +854,14 @@ body.obsia-hide-graph-ribbon .workspace-ribbon .clickable-icon.obsia-hidden-grap
   stroke: color-mix(in srgb, var(--text-normal) 84%, white 8%);
   stroke-width: 1.4;
   vector-effect: non-scaling-stroke;
+}
+
+.obsia-floor:not(.is-default-command-block) .obsia-floor-face {
+  stroke: #fff !important;
+}
+
+.obsia-floor:not(.is-default-command-block) .obsia-floor-label {
+  fill: #fff;
 }
 
 .obsia-floor-label {
@@ -851,6 +911,10 @@ body.obsia-hide-graph-ribbon .workspace-ribbon .clickable-icon.obsia-hidden-grap
   stroke: color-mix(in srgb, var(--text-accent) 76%, white 10%);
 }
 
+.obsia-floor.is-root:not(.is-default-command-block) .obsia-floor-face {
+  stroke: #fff !important;
+}
+
 .obsia-floor.is-match {
   transform: translateY(-1px);
 }
@@ -870,18 +934,26 @@ body.obsia-hide-graph-ribbon .workspace-ribbon .clickable-icon.obsia-hidden-grap
   fill: #ffb74d;
 }
 
-.obsia-floor.is-command .obsia-floor-face {
+.obsia-floor.is-command.is-default-command-block .obsia-floor-face {
   fill: color-mix(in srgb, var(--background-secondary) 74%, black 8%);
   stroke: color-mix(in srgb, var(--text-accent) 62%, white 12%);
 }
 
-.obsia-floor.is-command .obsia-floor-label {
+.obsia-floor.is-command.is-default-command-block .obsia-floor-label {
   fill: color-mix(in srgb, var(--text-accent) 90%, white 14%);
   font-weight: 600;
 }
 
-.obsia-floor.is-command:hover .obsia-floor-face {
+.obsia-floor.is-command.is-command-hover-exact .obsia-floor-face {
   stroke: #ff4d4f;
+}
+
+.obsia-floor.is-command.is-command-hover-exact {
+  transform: translateY(-2px);
+}
+
+.obsia-floor.is-command.is-command-hover-exact .obsia-floor-svg {
+  filter: drop-shadow(0 8px 14px color-mix(in srgb, black 42%, transparent));
 }
 
 .obsia-floor.is-dim {
@@ -911,6 +983,23 @@ body.obsia-hide-graph-ribbon .workspace-ribbon .clickable-icon.obsia-hidden-grap
 .obsia-grid-line.is-major {
   stroke: color-mix(in srgb, var(--background-modifier-border) 56%, transparent);
   opacity: 0.62;
+}
+
+.obsia-grid-axis {
+  stroke: #ff3b30;
+  stroke-width: 2.2;
+  opacity: 0.95;
+}
+
+.obsia-grid-axis-label {
+  fill: #ff3b30;
+  stroke: color-mix(in srgb, var(--background-primary) 88%, black);
+  stroke-width: 2.2;
+  paint-order: stroke fill;
+  font-size: 14px;
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: middle;
 }
 
 .obsia-build-footprints {

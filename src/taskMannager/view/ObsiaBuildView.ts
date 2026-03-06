@@ -45,6 +45,21 @@ type BuildingSize = {
   y: number
 }
 
+type CommandTower = {
+  floors: BuildingFloor[]
+  depthCenterUnits: number
+  size: BuildingSize
+}
+
+type CommandComposition = {
+  commandFloor: BuildingFloor
+  minSize: BuildingSize
+  rows: BuildingFloor[][]
+  rowDepths: number[]
+  size: BuildingSize
+  towers: CommandTower[]
+}
+
 function normalize(text: string): string {
   return text.trim().toLowerCase()
 }
@@ -54,6 +69,12 @@ function sortByNameAsc(items: TFile[]): TFile[] {
 }
 
 export class ObsiaBuildView extends ItemView {
+  private static readonly MAX_FLOORS_PER_ROW = 8
+  private static readonly MIN_ROW_DEPTH_UNITS = 2
+  private static readonly MAX_BUILDING_WIDTH_UNITS = 12
+  private static readonly MAX_BUILDING_DEPTH_UNITS = 96
+  private static readonly BASE_TO_ROWS_GAP_PX = FLOOR_STACK_STEP
+
   private plugin: ObsiaViewApi
   private sceneEl!: HTMLElement
   private worldEl!: HTMLElement
@@ -65,6 +86,7 @@ export class ObsiaBuildView extends ItemView {
   private searchStatusEl!: HTMLElement
   private searchResultsEl!: HTMLElement
   private floorByPath = new Map<string, HTMLElement>()
+  private buildingByRoot = new Map<string, Building>()
   private buildingElByRoot = new Map<string, HTMLElement>()
   private buildingPosByRoot = new Map<string, BuildingPosition>()
   private buildingRotationByRoot = new Map<string, number>()
@@ -98,6 +120,12 @@ export class ObsiaBuildView extends ItemView {
     startCameraY: number
   } | null = null
   private activeControlRootPath: string | null = null
+  private hoveredCommandFloorEl: HTMLElement | null = null
+
+  private normalizeRotation(rotation: number): 0 | 1 {
+    const normalized = ((Math.round(rotation) % 4) + 4) % 4
+    return (normalized === 1 || normalized === 3) ? 1 : 0
+  }
 
   constructor(leaf: WorkspaceLeaf, plugin: ObsiaViewApi) {
     super(leaf)
@@ -158,6 +186,9 @@ export class ObsiaBuildView extends ItemView {
     this.searchInputEl.addEventListener('keydown', this.onSearchKeydown)
     this.sceneEl.addEventListener('pointerdown', this.onScenePointerDown, true)
     this.sceneEl.addEventListener('pointerdown', this.onScenePanPointerDown)
+    this.sceneEl.addEventListener('pointermove', this.onScenePointerMove, true)
+    this.sceneEl.addEventListener('pointerleave', this.onScenePointerLeave)
+    this.sceneEl.addEventListener('dblclick', this.onSceneDoubleClick, true)
     this.sceneEl.addEventListener('wheel', this.onSceneWheel)
 
     this.resizeObserver = new ResizeObserver(() => this.redrawConnections())
@@ -171,6 +202,9 @@ export class ObsiaBuildView extends ItemView {
     this.searchInputEl?.removeEventListener('keydown', this.onSearchKeydown)
     this.sceneEl?.removeEventListener('pointerdown', this.onScenePointerDown, true)
     this.sceneEl?.removeEventListener('pointerdown', this.onScenePanPointerDown)
+    this.sceneEl?.removeEventListener('pointermove', this.onScenePointerMove, true)
+    this.sceneEl?.removeEventListener('pointerleave', this.onScenePointerLeave)
+    this.sceneEl?.removeEventListener('dblclick', this.onSceneDoubleClick, true)
     this.sceneEl?.removeEventListener('wheel', this.onSceneWheel)
     window.removeEventListener('pointermove', this.onWindowPointerMove)
     window.removeEventListener('pointerup', this.onWindowPointerUp)
@@ -188,6 +222,7 @@ export class ObsiaBuildView extends ItemView {
     this.panning = null
     this.sceneEl?.classList.remove('is-panning-camera')
     this.activeControlRootPath = null
+    this.setHoveredCommandFloor(null)
   }
 
   async refresh() {
@@ -254,6 +289,30 @@ export class ObsiaBuildView extends ItemView {
     window.addEventListener('pointerup', this.onWindowPointerUp)
   }
 
+  private onScenePointerMove = (event: PointerEvent) => {
+    const commandFloor = this.findCommandFloorAtPoint(event.clientX, event.clientY)
+    this.setHoveredCommandFloor(commandFloor)
+  }
+
+  private onScenePointerLeave = () => {
+    this.setHoveredCommandFloor(null)
+  }
+
+  private onSceneDoubleClick = (event: MouseEvent) => {
+    const commandFloor = this.findCommandFloorAtPoint(event.clientX, event.clientY)
+    if (!commandFloor)
+      return
+
+    const buildingEl = commandFloor.closest<HTMLElement>('.obsia-building')
+    const rootPath = buildingEl?.getAttribute('data-root-path')
+    if (!rootPath)
+      return
+
+    event.preventDefault()
+    event.stopPropagation()
+    this.toggleBuildingControls(rootPath)
+  }
+
   private onSceneWheel = (event: WheelEvent) => {
     event.preventDefault()
     const factor = Math.exp(-event.deltaY * 0.0015)
@@ -291,6 +350,7 @@ export class ObsiaBuildView extends ItemView {
     this.worldEl.appendChild(this.linksSvgEl)
     this.worldEl.appendChild(this.footprintSvgEl)
     this.floorByPath.clear()
+    this.buildingByRoot.clear()
     this.buildingElByRoot.clear()
     this.buildingPosByRoot.clear()
     this.buildingRotationByRoot.clear()
@@ -299,11 +359,16 @@ export class ObsiaBuildView extends ItemView {
     for (const [idx, building] of model.buildings.entries()) {
       const rawPosition = this.plugin.getBuildingPosition(building.rootPath) ?? this.getDefaultPosition(idx)
       const position = this.snapWorld(rawPosition)
-      const rotation = this.plugin.getBuildingRotation(building.rootPath)
-      const size = this.plugin.getBuildingSize(building.rootPath)
+      const rotation = this.normalizeRotation(this.plugin.getBuildingRotation(building.rootPath))
+      const originalSize = this.plugin.getBuildingSize(building.rootPath)
+      const size = this.clampBuildingSize(originalSize, building.rootPath, building)
+      this.buildingByRoot.set(building.rootPath, building)
       this.buildingPosByRoot.set(building.rootPath, position)
       this.buildingRotationByRoot.set(building.rootPath, rotation)
       this.buildingSizeByRoot.set(building.rootPath, size)
+      this.plugin.setBuildingRotation(building.rootPath, rotation)
+      if (size.x !== originalSize.x || size.y !== originalSize.y)
+        this.plugin.setBuildingSize(building.rootPath, size)
       this.renderBuilding(building)
     }
     this.layoutBuildings(true)
@@ -345,7 +410,7 @@ export class ObsiaBuildView extends ItemView {
       text: building.rootName,
     })
 
-    const stack = buildingEl.createDiv({ cls: 'obsia-building-stack' })
+    const stacksWrap = buildingEl.createDiv({ cls: 'obsia-building-stacks' })
     const controls = buildingEl.createDiv({ cls: 'obsia-building-controls' })
     const moveButton = controls.createEl('button', {
       cls: 'obsia-building-control is-move',
@@ -369,42 +434,215 @@ export class ObsiaBuildView extends ItemView {
       this.rotateBuilding(building.rootPath)
     })
 
-    for (const floor of building.floors) {
-      const floorEl = stack.createDiv({
-        cls: `obsia-floor ${floor.isRoot ? 'is-root' : ''} ${floor.kind === 'command' ? 'is-command' : ''}`,
-      })
-      if (floor.path)
-        floorEl.setAttribute('data-path', floor.path)
-      floorEl.setAttribute('data-name', floor.name)
-      floorEl.title = floor.path ?? `${building.rootName} - comandos`
-      floorEl.appendChild(this.createFloorSvg(building.rootPath, floor.name))
+    this.renderBuildingStacks(building, stacksWrap)
+  }
 
-      if (floor.kind === 'file' && floor.path)
-        this.floorByPath.set(floor.path, floorEl)
+  private renderBuildingStacks(building: Building, rootEl: HTMLElement) {
+    rootEl.empty()
+    this.clearFloorIndexForBuilding(building)
 
-      if (floor.kind === 'command') {
-        floorEl.addClass('is-command-handle')
-        floorEl.addEventListener('dblclick', (event) => {
-          event.preventDefault()
-          event.stopPropagation()
-          this.toggleBuildingControls(building.rootPath)
-        })
+    const composition = this.buildCommandComposition(building, this.getBuildingSize(building.rootPath))
+
+    const baseStack = rootEl.createDiv({ cls: 'obsia-building-stack obsia-building-base-stack' })
+    this.renderFloor(building, baseStack, composition.commandFloor, composition.size)
+
+    const rowsWrap = rootEl.createDiv({ cls: 'obsia-building-rows' })
+    rowsWrap.style.setProperty('--obsia-row-gap', `${ObsiaBuildView.BASE_TO_ROWS_GAP_PX}px`)
+    const baseTopCenter = this.getBaseTopCenter(baseStack)
+    const depthAxis = this.getDepthAxisForRotation(building.rootPath)
+    for (const tower of composition.towers) {
+      const stack = rowsWrap.createDiv({ cls: 'obsia-building-stack obsia-building-row-stack' })
+      const localOffset = {
+        x: depthAxis.x * tower.depthCenterUnits,
+        y: depthAxis.y * tower.depthCenterUnits,
       }
-      else if (floor.path) {
-        const filePath = floor.path
-        floorEl.addEventListener('click', () => this.plugin.openFileByPath(filePath))
+      for (const floor of tower.floors)
+        this.renderFloor(building, stack, floor, tower.size)
+
+      this.positionRowStackFromBaseTop(stack, baseTopCenter, localOffset)
+    }
+
+    const buildingEl = rootEl.closest<HTMLElement>('.obsia-building')
+    if (buildingEl)
+      this.updateBuildingTitlePosition(buildingEl)
+  }
+
+  private buildCommandComposition(building: Building, requestedSize: BuildingSize): CommandComposition {
+    const commandFloor = building.floors.find(floor => floor.kind === 'command') ?? {
+      path: null,
+      name: 'Comandos',
+      kind: 'command' as const,
+      isRoot: false,
+    }
+    const fileFloors = building.floors.filter(floor => floor.kind === 'file')
+    const rows = this.chunkFloors(fileFloors, ObsiaBuildView.MAX_FLOORS_PER_ROW)
+    const rowsCount = Math.max(1, rows.length)
+    const minSize: BuildingSize = {
+      x: 2,
+      y: Math.max(2, rowsCount * ObsiaBuildView.MIN_ROW_DEPTH_UNITS),
+    }
+    const size: BuildingSize = {
+      x: Math.max(minSize.x, Math.round(requestedSize.x)),
+      y: Math.max(minSize.y, Math.round(requestedSize.y)),
+    }
+
+    const rowDepths = this.splitDepthAcrossRows(size.y, rowsCount)
+    let cursor = -size.y / 2
+    const towers: CommandTower[] = rows.map((floors, rowIndex) => {
+      const rowDepth = rowDepths[rowIndex] ?? ObsiaBuildView.MIN_ROW_DEPTH_UNITS
+      const depthCenterUnits = cursor + (rowDepth / 2)
+      cursor += rowDepth
+      return {
+        floors,
+        depthCenterUnits,
+        size: {
+          x: size.x,
+          y: rowDepth,
+        },
+      }
+    })
+
+    return {
+      commandFloor,
+      minSize,
+      rows,
+      rowDepths,
+      size,
+      towers,
+    }
+  }
+
+  private chunkFloors(floors: BuildingFloor[], chunkSize: number): BuildingFloor[][] {
+    if (!floors.length)
+      return []
+
+    const chunks: BuildingFloor[][] = []
+    for (let i = 0; i < floors.length; i += chunkSize)
+      chunks.push(floors.slice(i, i + chunkSize))
+    return chunks
+  }
+
+  private renderFloor(building: Building, stackEl: HTMLElement, floor: BuildingFloor, size: BuildingSize) {
+    const metrics = this.getFloorMetrics(this.getRenderSize(building.rootPath, size))
+    const isDefaultCommandBlock = floor.kind === 'command' && floor.name.trim().toLowerCase() === 'comandos'
+    const floorEl = stackEl.createDiv({
+      cls: `obsia-floor ${floor.isRoot ? 'is-root' : ''} ${floor.kind === 'command' ? 'is-command' : ''} ${isDefaultCommandBlock ? 'is-default-command-block' : ''}`,
+    })
+    floorEl.style.setProperty('--obsia-floor-w', `${metrics.width}px`)
+    floorEl.style.setProperty('--obsia-floor-h', `${metrics.height}px`)
+    if (floor.path)
+      floorEl.setAttribute('data-path', floor.path)
+    floorEl.setAttribute('data-name', floor.name)
+    floorEl.title = floor.path ?? `${building.rootName} - comandos`
+    const floorSvg = this.createFloorSvg(metrics, floor.name)
+    floorEl.appendChild(floorSvg)
+
+    if (floor.kind === 'file' && floor.path)
+      this.floorByPath.set(floor.path, floorEl)
+
+    if (floor.kind === 'command') {
+      floorEl.addClass('is-command-handle')
+      return
+    }
+
+    if (floor.path) {
+      const filePath = floor.path
+      const interactiveParts = Array.from(
+        floorSvg.querySelectorAll<SVGElement>('.obsia-floor-face, .obsia-floor-label'),
+      )
+      let hoverDepth = 0
+
+      const onPartEnter = () => {
+        hoverDepth += 1
+        floorEl.addClass('is-file-hover')
+      }
+
+      const onPartLeave = () => {
+        hoverDepth = Math.max(hoverDepth - 1, 0)
+        if (!hoverDepth)
+          floorEl.removeClass('is-file-hover')
+      }
+
+      for (const part of interactiveParts) {
+        part.addEventListener('pointerenter', onPartEnter)
+        part.addEventListener('pointerleave', onPartLeave)
+        part.addEventListener('click', () => this.plugin.openFileByPath(filePath))
       }
     }
   }
 
-  private refreshBuildingFloorSvg(rootPath: string, buildingEl: HTMLElement) {
-    const floors = Array.from(buildingEl.querySelectorAll<HTMLElement>('.obsia-floor'))
-    for (const floorEl of floors) {
-      const label = floorEl.getAttribute('data-name') ?? ''
-      const current = floorEl.querySelector('.obsia-floor-svg')
-      current?.remove()
-      floorEl.appendChild(this.createFloorSvg(rootPath, label))
+  private clearFloorIndexForBuilding(building: Building) {
+    for (const floor of building.floors) {
+      if (floor.kind === 'file' && floor.path)
+        this.floorByPath.delete(floor.path)
     }
+  }
+
+  private updateBuildingTitlePosition(buildingEl: HTMLElement) {
+    const baseFloorEl = buildingEl.querySelector<HTMLElement>('.obsia-building-base-stack .obsia-floor')
+      ?? buildingEl.querySelector<HTMLElement>('.obsia-floor')
+    if (!baseFloorEl)
+      return
+
+    const buildingRect = buildingEl.getBoundingClientRect()
+    const baseRect = baseFloorEl.getBoundingClientRect()
+    const baseTop = baseRect.top - buildingRect.top
+
+    let maxTowerLevels = 0
+    const rowStacks = Array.from(buildingEl.querySelectorAll<HTMLElement>('.obsia-building-row-stack'))
+    for (const stackEl of rowStacks) {
+      const levels = stackEl.querySelectorAll('.obsia-floor').length
+      if (levels > maxTowerLevels)
+        maxTowerLevels = levels
+    }
+
+    const highestFloorTop = maxTowerLevels > 0
+      ? baseTop - (FLOOR_STACK_STEP * maxTowerLevels)
+      : baseTop
+
+    // Keep title elevation tied to floor stack levels, not floor footprint size.
+    const top = Math.round(highestFloorTop - Math.max(8, FLOOR_STACK_STEP * 0.22))
+    buildingEl.style.setProperty('--obsia-title-top', `${top}px`)
+  }
+
+  private setHoveredCommandFloor(floorEl: HTMLElement | null) {
+    if (this.hoveredCommandFloorEl === floorEl)
+      return
+
+    this.hoveredCommandFloorEl?.classList.remove('is-command-hover-exact')
+    this.hoveredCommandFloorEl = floorEl
+    this.hoveredCommandFloorEl?.classList.add('is-command-hover-exact')
+  }
+
+  private findCommandFloorAtPoint(clientX: number, clientY: number): HTMLElement | null {
+    const layeredElements = typeof document.elementsFromPoint === 'function'
+      ? document.elementsFromPoint(clientX, clientY)
+      : [document.elementFromPoint(clientX, clientY)].filter((element): element is Element => !!element)
+
+    for (const element of layeredElements) {
+      if (!(element instanceof SVGPathElement))
+        continue
+      if (!element.classList.contains('obsia-floor-face'))
+        continue
+
+      const commandFloor = element.closest<HTMLElement>('.obsia-floor.is-command')
+      if (!commandFloor)
+        continue
+      if (!this.isPointInsideFace(element, clientX, clientY))
+        continue
+      return commandFloor
+    }
+    return null
+  }
+
+  private isPointInsideFace(faceEl: SVGPathElement, clientX: number, clientY: number): boolean {
+    const screenCtm = faceEl.getScreenCTM()
+    if (!screenCtm)
+      return false
+    const localPoint = new DOMPoint(clientX, clientY).matrixTransform(screenCtm.inverse())
+    return typeof faceEl.isPointInFill === 'function'
+      ? faceEl.isPointInFill(localPoint)
+      : true
   }
 
   private toggleBuildingControls(rootPath: string) {
@@ -437,9 +675,8 @@ export class ObsiaBuildView extends ItemView {
     this.redrawConnections(this.activeEdges)
   }
 
-  private createFloorSvg(rootPath: string, label: string): SVGSVGElement {
-    const size = this.getBuildingSize(rootPath)
-    const metrics = this.getFloorMetrics(size)
+  private createFloorSvg(metrics: ReturnType<ObsiaBuildView['getFloorMetrics']>, label: string): SVGSVGElement {
+    const svgOffsetY = Math.round(metrics.height * -0.23)
 
     const ns = 'http://www.w3.org/2000/svg'
     const svg = document.createElementNS(ns, 'svg')
@@ -493,7 +730,71 @@ export class ObsiaBuildView extends ItemView {
 
     svg.setAttribute('data-anchor-x', String(metrics.anchor.x))
     svg.setAttribute('data-anchor-y', String(metrics.anchor.y))
+    svg.setAttribute('data-top-center-x', String(metrics.textTop.x))
+    svg.setAttribute('data-top-center-y', String(metrics.textTop.y))
+    svg.setAttribute('data-svg-offset-y', String(svgOffsetY))
+    svg.style.width = `${metrics.width}px`
+    svg.style.height = `${metrics.height}px`
+    svg.style.transform = `translateY(${svgOffsetY}px)`
     return svg
+  }
+
+  private getBaseTopCenter(baseStack: HTMLElement): BuildingPosition {
+    const baseFloor = baseStack.querySelector<HTMLElement>('.obsia-floor')
+    if (!baseFloor)
+      return { x: FLOOR_BASE_VERTEX_X, y: FLOOR_BASE_VERTEX_Y + FLOOR_SVG_OFFSET_Y }
+
+    const baseSvg = baseFloor.querySelector<SVGSVGElement>('.obsia-floor-svg')
+    const topCenterX = Number(baseSvg?.getAttribute('data-top-center-x') ?? '')
+    const topCenterY = Number(baseSvg?.getAttribute('data-top-center-y') ?? '')
+    const svgOffsetY = Number(baseSvg?.getAttribute('data-svg-offset-y') ?? '')
+
+    const anchorX = Number.isFinite(topCenterX) ? topCenterX : FLOOR_BASE_VERTEX_X
+    const anchorY = (Number.isFinite(topCenterY) ? topCenterY : FLOOR_BASE_VERTEX_Y)
+      + (Number.isFinite(svgOffsetY) ? svgOffsetY : FLOOR_SVG_OFFSET_Y)
+
+    return {
+      x: baseFloor.offsetLeft + anchorX,
+      y: baseFloor.offsetTop + anchorY,
+    }
+  }
+
+  private positionRowStackFromBaseTop(
+    stackEl: HTMLElement,
+    baseTopCenter: BuildingPosition,
+    localOffset: BuildingPosition,
+  ) {
+    const bottomFloor = stackEl.firstElementChild as HTMLElement | null
+    if (!bottomFloor) {
+      stackEl.style.left = `${baseTopCenter.x + localOffset.x}px`
+      stackEl.style.top = `${baseTopCenter.y + localOffset.y - FLOOR_STACK_STEP}px`
+      return
+    }
+
+    const floorTopCenterLocal = this.getFloorTopCenterLocal(bottomFloor)
+    const desiredTopCenter = {
+      x: baseTopCenter.x + localOffset.x,
+      y: baseTopCenter.y + localOffset.y - FLOOR_STACK_STEP,
+    }
+
+    stackEl.style.left = `${desiredTopCenter.x - floorTopCenterLocal.x}px`
+    stackEl.style.top = `${desiredTopCenter.y - floorTopCenterLocal.y}px`
+  }
+
+  private getFloorTopCenterLocal(floorEl: HTMLElement): BuildingPosition {
+    const svgEl = floorEl.querySelector<SVGSVGElement>('.obsia-floor-svg')
+    const topCenterX = Number(svgEl?.getAttribute('data-top-center-x') ?? '')
+    const topCenterY = Number(svgEl?.getAttribute('data-top-center-y') ?? '')
+    const svgOffsetY = Number(svgEl?.getAttribute('data-svg-offset-y') ?? '')
+
+    const localX = Number.isFinite(topCenterX) ? topCenterX : (floorEl.offsetWidth / 2)
+    const localY = (Number.isFinite(topCenterY) ? topCenterY : 0)
+      + (Number.isFinite(svgOffsetY) ? svgOffsetY : FLOOR_SVG_OFFSET_Y)
+
+    return {
+      x: floorEl.offsetLeft + localX,
+      y: floorEl.offsetTop + localY,
+    }
   }
 
   private compactLabel(input: string): string {
@@ -640,10 +941,12 @@ export class ObsiaBuildView extends ItemView {
     }
   }
 
-  private clampBuildingSize(size: BuildingSize): BuildingSize {
+  private clampBuildingSize(size: BuildingSize, rootPath?: string, building?: Building): BuildingSize {
+    const minSize = this.getMinSizeForBuilding(rootPath, building)
+    const rows = this.getRequiredRows(rootPath, building)
     return {
-      x: Math.max(2, Math.min(12, Math.round(size.x))),
-      y: Math.max(2, Math.min(12, Math.round(size.y))),
+      x: Math.max(minSize.x, Math.min(ObsiaBuildView.MAX_BUILDING_WIDTH_UNITS, Math.round(size.x))),
+      y: this.snapDepthToRowGrowth(size.y, rows, minSize.y),
     }
   }
 
@@ -651,12 +954,76 @@ export class ObsiaBuildView extends ItemView {
     return this.clampBuildingSize(this.buildingSizeByRoot.get(rootPath) ?? {
       x: ISO_BUILDING_GRID_UNITS,
       y: ISO_BUILDING_GRID_UNITS,
+    }, rootPath)
+  }
+
+  private getRequiredRows(rootPath?: string, building?: Building): number {
+    const targetBuilding = building ?? (rootPath ? this.buildingByRoot.get(rootPath) : undefined)
+    const fileFloorCount = targetBuilding
+      ? targetBuilding.floors.filter(floor => floor.kind === 'file').length
+      : 0
+    return this.getRequiredRowsForFloorCount(fileFloorCount)
+  }
+
+  private getRequiredRowsForFloorCount(fileFloorCount: number): number {
+    return Math.max(1, Math.ceil(fileFloorCount / ObsiaBuildView.MAX_FLOORS_PER_ROW))
+  }
+
+  private getMinSizeForBuilding(rootPath?: string, building?: Building): BuildingSize {
+    const requiredRows = this.getRequiredRows(rootPath, building)
+    return {
+      x: 2,
+      y: Math.max(2, requiredRows * ObsiaBuildView.MIN_ROW_DEPTH_UNITS),
+    }
+  }
+
+  private splitDepthAcrossRows(totalDepth: number, rows: number): number[] {
+    const normalizedRows = Math.max(1, rows)
+    const normalizedDepth = Math.max(
+      ObsiaBuildView.MIN_ROW_DEPTH_UNITS * normalizedRows,
+      Math.round(totalDepth),
+    )
+    const base = Math.floor(normalizedDepth / normalizedRows)
+    const remainder = normalizedDepth % normalizedRows
+    return Array.from({ length: normalizedRows }, (_, index) => {
+      return base + (index < remainder ? 1 : 0)
     })
+  }
+
+  private getRenderSize(rootPath: string, size: BuildingSize): BuildingSize {
+    const rotation = this.normalizeRotation(this.buildingRotationByRoot.get(rootPath) ?? 0)
+    if (rotation === 1) {
+      return {
+        x: size.y,
+        y: size.x,
+      }
+    }
+    return size
+  }
+
+  private getDepthAxisForRotation(rootPath: string): BuildingPosition {
+    const rotation = this.normalizeRotation(this.buildingRotationByRoot.get(rootPath) ?? 0)
+    const axes: BuildingPosition[] = [
+      { x: -FLOOR_ISO_UX, y: FLOOR_ISO_UY },
+      { x: FLOOR_ISO_UX, y: FLOOR_ISO_UY },
+    ]
+    return axes[rotation] ?? axes[0]
+  }
+
+  private snapDepthToRowGrowth(rawDepth: number, rows: number, minDepth: number): number {
+    const normalizedRows = Math.max(1, rows)
+    const maxDepth = ObsiaBuildView.MAX_BUILDING_DEPTH_UNITS
+    const safeMinDepth = Math.max(2, Math.round(minDepth))
+    const boundedMinDepth = Math.min(maxDepth, safeMinDepth)
+    const maxSteps = Math.max(0, Math.floor((maxDepth - boundedMinDepth) / normalizedRows))
+    const rawSteps = Math.round((Math.round(rawDepth) - boundedMinDepth) / normalizedRows)
+    const steps = Math.max(0, Math.min(maxSteps, rawSteps))
+    return boundedMinDepth + (steps * normalizedRows)
   }
 
   private applyBuildingSizeVars(rootPath: string, buildingEl: HTMLElement) {
     const size = this.getBuildingSize(rootPath)
-    const metrics = this.getFloorMetrics(size)
+    const metrics = this.getFloorMetrics(this.getRenderSize(rootPath, size))
     buildingEl.style.setProperty('--obsia-floor-w', `${metrics.width}px`)
     buildingEl.style.setProperty('--obsia-floor-h', `${metrics.height}px`)
     buildingEl.style.setProperty('--obsia-floor-slot-h', `${FLOOR_STACK_STEP}px`)
@@ -666,7 +1033,8 @@ export class ObsiaBuildView extends ItemView {
   }
 
   private getBuildingAnchor(rootPath: string, buildingEl: HTMLElement): BuildingPosition {
-    const baseEl = buildingEl.querySelector<HTMLElement>('.obsia-floor.is-command')
+    const commandFloors = Array.from(buildingEl.querySelectorAll<HTMLElement>('.obsia-floor.is-command'))
+    const baseEl = commandFloors[Math.floor(commandFloors.length / 2)]
       ?? buildingEl.querySelector<HTMLElement>('.obsia-floor')
     if (!baseEl) {
       return {
@@ -678,11 +1046,11 @@ export class ObsiaBuildView extends ItemView {
     const svgEl = baseEl.querySelector<SVGSVGElement>('.obsia-floor-svg')
     const dataAnchorX = Number(svgEl?.getAttribute('data-anchor-x') ?? '')
     const dataAnchorY = Number(svgEl?.getAttribute('data-anchor-y') ?? '')
-    const svgOffsetYRaw = getComputedStyle(buildingEl).getPropertyValue('--obsia-svg-offset-y').trim()
-    const svgOffsetY = Number.parseFloat(svgOffsetYRaw)
+    const svgOffsetYRaw = Number(svgEl?.getAttribute('data-svg-offset-y') ?? '')
+    const svgOffsetY = Number.isFinite(svgOffsetYRaw) ? svgOffsetYRaw : FLOOR_SVG_OFFSET_Y
     const localAnchorX = Number.isFinite(dataAnchorX) ? dataAnchorX : FLOOR_BASE_VERTEX_X
     const localAnchorYBase = Number.isFinite(dataAnchorY) ? dataAnchorY : FLOOR_BASE_VERTEX_Y
-    const localAnchorY = localAnchorYBase + (Number.isFinite(svgOffsetY) ? svgOffsetY : FLOOR_SVG_OFFSET_Y)
+    const localAnchorY = localAnchorYBase + svgOffsetY
     return {
       x: baseEl.offsetLeft + localAnchorX,
       y: baseEl.offsetTop + localAnchorY,
@@ -705,9 +1073,12 @@ export class ObsiaBuildView extends ItemView {
       return
 
     const currentSize = this.getBuildingSize(rootPath)
+    const rotation = this.normalizeRotation(this.buildingRotationByRoot.get(rootPath) ?? 0)
+    const xSpan = rotation === 1 ? currentSize.y : currentSize.x
+    const ySpan = rotation === 1 ? currentSize.x : currentSize.y
     const fixedWorld = {
-      x: worldPos.x - (currentSize.x * ISO_GRID_BASE),
-      y: worldPos.y - (currentSize.y * ISO_GRID_BASE),
+      x: worldPos.x - (xSpan * ISO_GRID_BASE),
+      y: worldPos.y - (ySpan * ISO_GRID_BASE),
     }
 
     this.resizing = {
@@ -777,21 +1148,28 @@ export class ObsiaBuildView extends ItemView {
       // d = sx * u + sy * v (iso basis), with opposite corner fixed.
       const rawSizeX = ((d.y / ay) + (d.x / ax)) * 0.5
       const rawSizeY = ((d.y / ay) - (d.x / ax)) * 0.5
-      const size = this.clampBuildingSize({
-        x: rawSizeX,
-        y: rawSizeY,
-      })
+      const rotation = this.normalizeRotation(this.buildingRotationByRoot.get(this.resizing.rootPath) ?? 0)
+      const requestedSize = rotation === 1
+        // At 90deg, visual X growth maps to logical Y (row-growth axis).
+        ? { x: rawSizeY, y: rawSizeX }
+        : { x: rawSizeX, y: rawSizeY }
+      const size = this.clampBuildingSize(requestedSize, this.resizing.rootPath)
+      const xSpan = rotation === 1 ? size.y : size.x
+      const ySpan = rotation === 1 ? size.x : size.y
       const snappedAnchor = {
-        x: this.resizing.fixedWorldX + (size.x * ISO_GRID_BASE),
-        y: this.resizing.fixedWorldY + (size.y * ISO_GRID_BASE),
+        x: this.resizing.fixedWorldX + (xSpan * ISO_GRID_BASE),
+        y: this.resizing.fixedWorldY + (ySpan * ISO_GRID_BASE),
       }
 
       this.buildingSizeByRoot.set(this.resizing.rootPath, size)
       this.buildingPosByRoot.set(this.resizing.rootPath, snappedAnchor)
       const buildingEl = this.buildingElByRoot.get(this.resizing.rootPath)
+      const building = this.buildingByRoot.get(this.resizing.rootPath)
       if (buildingEl) {
         this.applyBuildingSizeVars(this.resizing.rootPath, buildingEl)
-        this.refreshBuildingFloorSvg(this.resizing.rootPath, buildingEl)
+        const stacksWrap = buildingEl.querySelector<HTMLElement>('.obsia-building-stacks')
+        if (building && stacksWrap)
+          this.renderBuildingStacks(building, stacksWrap)
       }
       this.layoutBuildings(false)
       this.redrawConnections(this.activeEdges)
@@ -857,19 +1235,27 @@ export class ObsiaBuildView extends ItemView {
   }
 
   private rotateBuilding(rootPath: string) {
-    const current = this.buildingRotationByRoot.get(rootPath) ?? 0
-    const next = (current + 1) % 4
+    const current = this.normalizeRotation(this.buildingRotationByRoot.get(rootPath) ?? 0)
+    const next: 0 | 1 = current === 0 ? 1 : 0
     this.buildingRotationByRoot.set(rootPath, next)
     this.plugin.setBuildingRotation(rootPath, next)
     const buildingEl = this.buildingElByRoot.get(rootPath)
-    if (buildingEl)
+    const building = this.buildingByRoot.get(rootPath)
+    if (buildingEl) {
       this.applyBuildingRotationClass(buildingEl, next)
+      this.applyBuildingSizeVars(rootPath, buildingEl)
+      const stacksWrap = buildingEl.querySelector<HTMLElement>('.obsia-building-stacks')
+      if (building && stacksWrap)
+        this.renderBuildingStacks(building, stacksWrap)
+    }
+    this.layoutBuildings(false)
     this.redrawConnections(this.activeEdges)
   }
 
   private applyBuildingRotationClass(buildingEl: HTMLElement, rotation: number) {
+    const normalized = this.normalizeRotation(rotation)
     buildingEl.classList.remove('rot-0', 'rot-1', 'rot-2', 'rot-3')
-    buildingEl.classList.add(`rot-${rotation % 4}`)
+    buildingEl.classList.add(`rot-${normalized}`)
   }
 
   private updateFootprint() {
@@ -891,15 +1277,16 @@ export class ObsiaBuildView extends ItemView {
     }
 
     const size = this.getBuildingSize(this.dragging.rootPath)
+    const renderSize = this.getRenderSize(this.dragging.rootPath, size)
     // Use the exact same screen-space basis as floor geometry, so the
     // movement footprint matches building size 1:1.
     const edgeToRight = {
-      x: FLOOR_ISO_UX * size.y,
-      y: -FLOOR_ISO_UY * size.y,
+      x: FLOOR_ISO_UX * renderSize.y,
+      y: -FLOOR_ISO_UY * renderSize.y,
     }
     const edgeToLeft = {
-      x: -FLOOR_ISO_UX * size.x,
-      y: -FLOOR_ISO_UY * size.x,
+      x: -FLOOR_ISO_UX * renderSize.x,
+      y: -FLOOR_ISO_UY * renderSize.x,
     }
 
     const p0 = { x: center.x, y: center.y }
@@ -977,6 +1364,7 @@ export class ObsiaBuildView extends ItemView {
   private redrawGrid(width: number, height: number) {
     this.gridSvgEl.empty()
 
+    const ns = 'http://www.w3.org/2000/svg'
     const u = this.project({ x: ISO_GRID_BASE, y: 0 })
     const v = this.project({ x: 0, y: ISO_GRID_BASE })
     const origin = {
@@ -997,7 +1385,7 @@ export class ObsiaBuildView extends ItemView {
         x: origin.x + (i * u.x) + (max * v.x),
         y: origin.y + (i * u.y) + (max * v.y),
       }
-      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line')
+      const line = document.createElementNS(ns, 'line')
       line.setAttribute('x1', String(a.x))
       line.setAttribute('y1', String(a.y))
       line.setAttribute('x2', String(b.x))
@@ -1017,7 +1405,7 @@ export class ObsiaBuildView extends ItemView {
         x: origin.x + (max * u.x) + (i * v.x),
         y: origin.y + (max * u.y) + (i * v.y),
       }
-      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line')
+      const line = document.createElementNS(ns, 'line')
       line.setAttribute('x1', String(a.x))
       line.setAttribute('y1', String(a.y))
       line.setAttribute('x2', String(b.x))
@@ -1027,6 +1415,56 @@ export class ObsiaBuildView extends ItemView {
         line.classList.add('is-major')
       this.gridSvgEl.appendChild(line)
     }
+
+    const axisLength = Math.max(width, height)
+    const axisXEnd = {
+      x: origin.x + ((axisLength / ISO_GRID_BASE) * u.x),
+      y: origin.y + ((axisLength / ISO_GRID_BASE) * u.y),
+    }
+    const axisYEnd = {
+      x: origin.x + ((axisLength / ISO_GRID_BASE) * v.x),
+      y: origin.y + ((axisLength / ISO_GRID_BASE) * v.y),
+    }
+
+    const axisXLine = document.createElementNS(ns, 'line')
+    axisXLine.setAttribute('x1', String(origin.x))
+    axisXLine.setAttribute('y1', String(origin.y))
+    axisXLine.setAttribute('x2', String(axisXEnd.x))
+    axisXLine.setAttribute('y2', String(axisXEnd.y))
+    axisXLine.classList.add('obsia-grid-axis', 'is-x')
+    this.gridSvgEl.appendChild(axisXLine)
+
+    const axisYLine = document.createElementNS(ns, 'line')
+    axisYLine.setAttribute('x1', String(origin.x))
+    axisYLine.setAttribute('y1', String(origin.y))
+    axisYLine.setAttribute('x2', String(axisYEnd.x))
+    axisYLine.setAttribute('y2', String(axisYEnd.y))
+    axisYLine.classList.add('obsia-grid-axis', 'is-y')
+    this.gridSvgEl.appendChild(axisYLine)
+
+    const labelStep = ISO_GRID_BASE * 3
+    const axisXLabelPos = {
+      x: origin.x + ((labelStep / ISO_GRID_BASE) * u.x),
+      y: origin.y + ((labelStep / ISO_GRID_BASE) * u.y),
+    }
+    const axisYLabelPos = {
+      x: origin.x + ((labelStep / ISO_GRID_BASE) * v.x),
+      y: origin.y + ((labelStep / ISO_GRID_BASE) * v.y),
+    }
+
+    const axisXLabel = document.createElementNS(ns, 'text')
+    axisXLabel.setAttribute('x', String(axisXLabelPos.x + 8))
+    axisXLabel.setAttribute('y', String(axisXLabelPos.y + 2))
+    axisXLabel.textContent = 'X'
+    axisXLabel.classList.add('obsia-grid-axis-label', 'is-x')
+    this.gridSvgEl.appendChild(axisXLabel)
+
+    const axisYLabel = document.createElementNS(ns, 'text')
+    axisYLabel.setAttribute('x', String(axisYLabelPos.x - 8))
+    axisYLabel.setAttribute('y', String(axisYLabelPos.y + 2))
+    axisYLabel.textContent = 'Y'
+    axisYLabel.classList.add('obsia-grid-axis-label', 'is-y')
+    this.gridSvgEl.appendChild(axisYLabel)
   }
 
   private clearSearchVisuals() {
