@@ -86,4 +86,64 @@ export interface PluginSettingsData {
   tableros?: Equipo[] | string[]
   equipos?: Equipo[] | string[]
   pomodoro?: unknown
+  obsia?: unknown
+}
+
+export interface BuildingFloor {
+  path: string | null
+  name: string
+  kind: 'file' | 'command'
+  isRoot: boolean
+}
+
+export interface Building {
+  id: string
+  rootPath: string
+  rootName: string
+  floors: BuildingFloor[]
+}
+
+export interface BuildEdge {
+  fromPath: string
+  toPath: string
+}
+
+export interface BuildModel {
+  buildings: Building[]
+  edges: BuildEdge[]
+  representedPaths: Set<string>
+}
+
+export interface BuildingPosition {
+  x: number
+  y: number
+}
+
+export interface BuildingSize {
+  x: number
+  y: number
+}
+
+export interface ObsiaSettings {
+  buildingPositions: Record<string, BuildingPosition>
+  buildingRotations: Record<string, number>
+  buildingSizes: Record<string, BuildingSize | number>
+}
+
+export interface CachedSearchEntry {
+  mtime: number
+  basenameLower: string
+  contentLower: string
+}
+
+export interface ObsiaViewApi {
+  buildModel: () => BuildModel
+  findMatches: (query: string) => Promise<TFile[]>
+  openFileByPath: (path: string) => Promise<void>
+  getBuildingPosition: (rootPath: string) => BuildingPosition | null
+  getBuildingRotation: (rootPath: string) => number
+  getBuildingSize: (rootPath: string) => BuildingSize
+  setBuildingPosition: (rootPath: string, position: BuildingPosition) => void
+  setBuildingRotation: (rootPath: string, rotation: number) => void
+  setBuildingSize: (rootPath: string, size: BuildingSize) => void
 }

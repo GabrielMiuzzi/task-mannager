@@ -1,6 +1,6 @@
 import { DEFAULT_BOARD_NAME, DEFAULT_EQUIPOS, DEFAULT_TABLEROS } from '../constants'
 import { normalizePomodoroState } from '../engines/pomodoroEngine'
-import type { Equipo, PomodoroState } from '../types'
+import type { BuildingPosition, BuildingSize, Equipo, ObsiaSettings, PomodoroState } from '../types'
 import { isRecord } from './guards'
 
 const LEGACY_FALLBACK_COLORS = ['#d97a1e', '#2e6db0', '#7c5ce7', '#00b894', '#e17055', '#fd79a8']
@@ -71,6 +71,27 @@ export function normalizePomodoroFromSettings(rawData: unknown): PomodoroState {
   return normalizePomodoroState(rawData.pomodoro)
 }
 
+export function createDefaultObsiaSettings(): ObsiaSettings {
+  return {
+    buildingPositions: {},
+    buildingRotations: {},
+    buildingSizes: {},
+  }
+}
+
+export function normalizeObsiaFromSettings(rawData: unknown): ObsiaSettings {
+  const defaults = createDefaultObsiaSettings()
+  if (!isRecord(rawData) || !isRecord(rawData.obsia))
+    return defaults
+
+  const obsiaData = rawData.obsia
+  return {
+    buildingPositions: normalizeBuildingPositions(obsiaData.buildingPositions),
+    buildingRotations: normalizeBuildingRotations(obsiaData.buildingRotations),
+    buildingSizes: normalizeBuildingSizes(obsiaData.buildingSizes),
+  }
+}
+
 function extractEquipos(rawData: unknown): unknown[] | undefined {
   if (!isRecord(rawData))
     return undefined
@@ -103,6 +124,62 @@ function shouldReuseEquiposAsBoards(rawData: unknown): boolean {
 
   const namedEquipos = equipos.filter(isEquipo)
   return namedEquipos.some(item => item.name.trim().toLowerCase() === 'default')
+}
+
+function normalizeBuildingPositions(value: unknown): Record<string, BuildingPosition> {
+  if (!isRecord(value))
+    return {}
+
+  const positions: Record<string, BuildingPosition> = {}
+  for (const [key, rawPosition] of Object.entries(value)) {
+    if (!isRecord(rawPosition))
+      continue
+
+    const x = Number(rawPosition.x)
+    const y = Number(rawPosition.y)
+    if (Number.isNaN(x) || Number.isNaN(y))
+      continue
+
+    positions[key] = { x, y }
+  }
+  return positions
+}
+
+function normalizeBuildingRotations(value: unknown): Record<string, number> {
+  if (!isRecord(value))
+    return {}
+
+  const rotations: Record<string, number> = {}
+  for (const [key, rawRotation] of Object.entries(value)) {
+    const rotation = Number(rawRotation)
+    if (!Number.isNaN(rotation))
+      rotations[key] = rotation
+  }
+  return rotations
+}
+
+function normalizeBuildingSizes(value: unknown): Record<string, BuildingSize | number> {
+  if (!isRecord(value))
+    return {}
+
+  const sizes: Record<string, BuildingSize | number> = {}
+  for (const [key, rawSize] of Object.entries(value)) {
+    if (typeof rawSize === 'number' && !Number.isNaN(rawSize)) {
+      sizes[key] = rawSize
+      continue
+    }
+
+    if (!isRecord(rawSize))
+      continue
+
+    const x = Number(rawSize.x)
+    const y = Number(rawSize.y)
+    if (Number.isNaN(x) || Number.isNaN(y))
+      continue
+
+    sizes[key] = { x, y }
+  }
+  return sizes
 }
 
 function isEquipo(value: unknown): value is Equipo {

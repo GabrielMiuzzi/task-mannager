@@ -1,4 +1,6 @@
 export const VIEW_TYPE = 'tareas-view'
+export const OBSIA_VIEW_TYPE = 'obsia-build-view'
+export const OBSIA_GRAPH_HIDE_CLASS = 'obsia-hide-graph-ribbon'
 export const TAREAS_FOLDER = 'task-mannager'
 export const COMPLETED_TASKS_FOLDER = `${TAREAS_FOLDER}/finished`
 export const COMPLETED_SUBTASKS_FOLDER = `${COMPLETED_TASKS_FOLDER}/subTasks`

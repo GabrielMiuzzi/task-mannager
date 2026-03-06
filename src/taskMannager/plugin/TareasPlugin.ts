@@ -29,8 +29,15 @@ import {
   syncRootTaskIndexLinks,
 } from '../engines/taskIndexEngine'
 import { NewTaskModal } from '../modals/NewTaskModal'
-import type { Equipo, PomodoroState } from '../types'
-import { normalizeEquiposFromSettings, normalizePomodoroFromSettings, normalizeTablerosFromSettings } from '../utils/settings'
+import { ObsiaIntegration } from './ObsiaIntegration'
+import type { Equipo, ObsiaSettings, PomodoroState } from '../types'
+import {
+  createDefaultObsiaSettings,
+  normalizeEquiposFromSettings,
+  normalizeObsiaFromSettings,
+  normalizePomodoroFromSettings,
+  normalizeTablerosFromSettings,
+} from '../utils/settings'
 import { TareasView } from '../view/TareasView'
 
 interface GraphGroupDefinition {
@@ -42,12 +49,16 @@ export class TareasPlugin extends obsidian.Plugin {
   tableros: Equipo[] = [...DEFAULT_TABLEROS]
   equipos: Equipo[] = [...DEFAULT_EQUIPOS]
   pomodoro: PomodoroState = createDefaultPomodoroState()
+  obsia: ObsiaSettings = createDefaultObsiaSettings()
+  private obsiaIntegration: ObsiaIntegration | null = null
 
   async onload() {
     await this.loadSettings()
     await this.ensureDefaultBoardInSettings()
+    this.obsiaIntegration = new ObsiaIntegration(this, this.obsia)
 
     this.registerView(VIEW_TYPE, leaf => new TareasView(leaf, this))
+    this.obsiaIntegration.onload()
 
     this.addRibbonIcon('list-checks', 'Abrir Tareas', () => this.activateView())
 
@@ -74,6 +85,11 @@ export class TareasPlugin extends obsidian.Plugin {
     }))
   }
 
+  onunload() {
+    this.obsiaIntegration?.onunload()
+    this.obsiaIntegration = null
+  }
+
   async activateView() {
     const { workspace } = this.app
     let leaf = workspace.getLeavesOfType(VIEW_TYPE)[0]
@@ -91,6 +107,7 @@ export class TareasPlugin extends obsidian.Plugin {
     this.tableros = normalizeTablerosFromSettings(rawData)
     this.equipos = normalizeEquiposFromSettings(rawData)
     this.pomodoro = normalizePomodoroFromSettings(rawData)
+    this.obsia = normalizeObsiaFromSettings(rawData)
   }
 
   private async ensureDefaultBoardInSettings() {
@@ -107,7 +124,16 @@ export class TareasPlugin extends obsidian.Plugin {
       tableros: this.tableros,
       equipos: this.equipos,
       pomodoro: this.pomodoro,
+      obsia: this.obsia,
     })
+  }
+
+  setObsiaSettings(nextSettings: ObsiaSettings) {
+    this.obsia = {
+      buildingPositions: { ...nextSettings.buildingPositions },
+      buildingRotations: { ...nextSettings.buildingRotations },
+      buildingSizes: { ...nextSettings.buildingSizes },
+    }
   }
 
   setPomodoroState(nextState: PomodoroState) {
